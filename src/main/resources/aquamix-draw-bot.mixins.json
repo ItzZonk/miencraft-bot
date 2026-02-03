@@ -1,0 +1,13 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "com.aquamix.drawbot.mixin",
+    "compatibilityLevel": "JAVA_21",
+    "mixins": [],
+    "client": [
+        "ChatMessageMixin"
+    ],
+    "injectors": {
+        "defaultRequire": 1
+    }
+}

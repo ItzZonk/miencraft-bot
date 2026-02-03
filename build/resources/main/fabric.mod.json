@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "aquamix-draw-bot",
+  "version": "1.3.3",
+  "name": "Aquamix Draw Bot",
+  "description": "Автоматизация создания пиксель-арта через удаление чанков на сервере mc.aqua-mix.com",
+  "authors": [
+    "ItzZonk"
+  ],
+  "contact": {
+    "homepage": "https://github.com/ItzZonk/aquamix-draw-bot"
+  },
+  "license": "MIT",
+  "icon": "assets/aquamix-draw-bot/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      {
+        "adapter": "kotlin",
+        "value": "com.aquamix.drawbot.AquamixDrawBot"
+      }
+    ],
+    "modmenu": [
+      {
+        "adapter": "kotlin",
+        "value": "com.aquamix.drawbot.config.ModMenuIntegration"
+      }
+    ]
+  },
+  "mixins": [
+    "aquamix-draw-bot.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "fabric-language-kotlin": "*",
+    "minecraft": "~1.21.1",
+    "java": ">=21"
+  },
+  "suggests": {
+    "cloth-config": "*",
+    "modmenu": "*"
+  }
+}
