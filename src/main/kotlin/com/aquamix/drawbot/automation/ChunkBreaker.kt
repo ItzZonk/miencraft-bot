@@ -32,10 +32,16 @@ class ChunkBreaker {
         if (!canAct()) return false
         
         // 1. Look DOWN to place block reliably
-        if (player.pitch < 80f) {
-            player.pitch = 90f
+        // 1. Look at the target block (Forward-Down)
+        // Since we land 2 blocks away, pitch ~45-60 should aim at the block in front of us at feet level
+        val targetPitch = 50f
+        
+        if (kotlin.math.abs(player.pitch - targetPitch) > 5f) {
+            player.pitch = targetPitch
+            // Look towards the center of the chunk? 
+            // Validating rotation takes time, return false to wait
             markAction()
-            return false // Wait for rotation to apply
+            return false 
         }
         
         // 2. Find BUR in hotbar
@@ -73,6 +79,10 @@ class ChunkBreaker {
         }
         
         AquamixDrawBot.LOGGER.debug("Cannot place BUR: no block target found (Raycast fail)")
+        // Optional: Notify user why it failed if in debug mode or repeatedly
+        if (AquamixDrawBot.LOGGER.isDebugEnabled) {
+            client.player?.sendMessage(net.minecraft.text.Text.of("§7[Debug] Raycast MISS. Pitch: ${player.pitch}"), true)
+        }
         return false
     }
     

@@ -55,6 +55,11 @@ object AquamixDrawBot : ClientModInitializer {
         ClientTickEvents.START_CLIENT_TICK.register { client ->
             handleKeyBindings(client)
             if (client.player != null && client.world != null) {
+                // FORCE INPUT SIMULATION
+                // This replaces the Mixin approach. We manually press the keys requested by the bot.
+                // Doing this in START_CLIENT_TICK ensures it overrides hardware input for this frame.
+                applyBotInputOverrides(client)
+                
                 botController.tick(client)
             }
         }
@@ -107,6 +112,40 @@ object AquamixDrawBot : ClientModInitializer {
             if (client.currentScreen == null) {
                 botController.toggle()
             }
+        }
+    }
+    
+    /**
+     * Applies the key press states from InputOverrideHandler to the vanilla KeyBindings.
+     * This simulates physical key presses.
+     */
+    private fun applyBotInputOverrides(client: MinecraftClient) {
+        val options = client.options
+        if (com.aquamix.drawbot.input.InputOverrideHandler.isInControl()) {
+            // Helper to force a key pressed
+            fun forceKey(key: KeyBinding, input: com.aquamix.drawbot.input.BotInput) {
+                val pressed = com.aquamix.drawbot.input.InputOverrideHandler.isInputForced(input)
+                
+                // Method 1: Set the boolean flag (used by high-level logic)
+                key.isPressed = pressed
+                
+                // Method 2: Set the raw input state (used by low-level logic/Litematica/etc)
+                // We only set it to true to avoid blocking real input if we are mixing (though we usually take full control)
+                if (pressed) {
+                    KeyBinding.setKeyPressed(InputUtil.fromTranslationKey(key.boundKeyTranslationKey), true)
+                }
+            }
+            
+            forceKey(options.forwardKey, com.aquamix.drawbot.input.BotInput.MOVE_FORWARD)
+            forceKey(options.backKey, com.aquamix.drawbot.input.BotInput.MOVE_BACK)
+            forceKey(options.leftKey, com.aquamix.drawbot.input.BotInput.MOVE_LEFT)
+            forceKey(options.rightKey, com.aquamix.drawbot.input.BotInput.MOVE_RIGHT)
+            forceKey(options.jumpKey, com.aquamix.drawbot.input.BotInput.JUMP)
+            forceKey(options.sneakKey, com.aquamix.drawbot.input.BotInput.SNEAK)
+            forceKey(options.sprintKey, com.aquamix.drawbot.input.BotInput.SPRINT)
+            
+            // Mouse clicks are handled differently (usually interaction manager), 
+            // but for simple hold-actions we can simulate them too if needed.
         }
     }
 }
