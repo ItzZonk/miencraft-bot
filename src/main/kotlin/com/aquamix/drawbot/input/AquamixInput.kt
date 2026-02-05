@@ -1,72 +1,69 @@
 package com.aquamix.drawbot.input
 
+import com.aquamix.drawbot.AquamixDrawBot
 import net.minecraft.client.input.KeyboardInput
 import net.minecraft.client.option.GameOptions
 
 /**
- * Custom Input implementation that reads movement overrides from InputOverrideHandler.
- * Based on Baritone's PlayerMovementInput pattern.
- * 
- * When InputOverrideHandler has forced inputs, this class applies them.
- * Otherwise, it delegates to vanilla KeyboardInput behavior.
+ * Baritone-style Input implementation.
+ * Заменяет KeyboardInput через mixin и напрямую устанавливает движение.
  */
 class AquamixInput(settings: GameOptions) : KeyboardInput(settings) {
     
+    init {
+        AquamixDrawBot.LOGGER.info("[AquamixInput] === MIXIN РАБОТАЕТ! AquamixInput создан ===")
+    }
+    
     override fun tick(slowDown: Boolean, f: Float) {
-        // First, let vanilla KeyboardInput process real keyboard state
+        // Сначала реальный ввод с клавиатуры
         super.tick(slowDown, f)
         
-        // Then, apply overrides from InputOverrideHandler if bot is in control
+        // Если бот контролирует - перезаписываем значения напрямую
         if (InputOverrideHandler.isInControl()) {
-            applyBotOverrides()
+            // Сбрасываем всё что поставил super.tick()
+            var forward = 0.0f
+            var sideways = 0.0f
             
-            // Recalculate movement vectors with overridden values
-            this.movementForward = calculateMovement(pressingForward, pressingBack)
-            this.movementSideways = calculateMovement(pressingLeft, pressingRight)
-            
-            if (slowDown) {
-                this.movementSideways *= 0.3f
-                this.movementForward *= 0.3f
+            // Применяем состояние бота
+            if (InputOverrideHandler.isInputForced(BotInput.MOVE_FORWARD)) {
+                forward += 1.0f
+                this.pressingForward = true
             }
-        }
-    }
-    
-    /**
-     * Apply forced inputs from the central handler.
-     */
-    private fun applyBotOverrides() {
-        // Movement
-        if (InputOverrideHandler.isInputForced(BotInput.MOVE_FORWARD)) {
-            this.pressingForward = true
-        }
-        if (InputOverrideHandler.isInputForced(BotInput.MOVE_BACK)) {
-            this.pressingBack = true
-        }
-        if (InputOverrideHandler.isInputForced(BotInput.MOVE_LEFT)) {
-            this.pressingLeft = true
-        }
-        if (InputOverrideHandler.isInputForced(BotInput.MOVE_RIGHT)) {
-            this.pressingRight = true
-        }
-        
-        // Actions
-        if (InputOverrideHandler.isInputForced(BotInput.JUMP)) {
-            this.jumping = true
-        }
-        if (InputOverrideHandler.isInputForced(BotInput.SNEAK)) {
-            this.sneaking = true
-        }
-    }
-    
-    /**
-     * Calculate movement value from two opposing direction flags.
-     */
-    private fun calculateMovement(positive: Boolean, negative: Boolean): Float {
-        return when {
-            positive == negative -> 0.0f
-            positive -> 1.0f
-            else -> -1.0f
+            if (InputOverrideHandler.isInputForced(BotInput.MOVE_BACK)) {
+                forward -= 1.0f
+                this.pressingBack = true
+            }
+            if (InputOverrideHandler.isInputForced(BotInput.MOVE_LEFT)) {
+                sideways += 1.0f
+                this.pressingLeft = true
+            }
+            if (InputOverrideHandler.isInputForced(BotInput.MOVE_RIGHT)) {
+                sideways -= 1.0f
+                this.pressingRight = true
+            }
+            
+            // slowDown применяется при приседании
+            if (slowDown) {
+                forward *= 0.3f
+                sideways *= 0.3f
+            }
+            
+            // НАПРЯМУЮ устанавливаем поля движения
+            this.movementForward = forward
+            this.movementSideways = sideways
+            
+            // Прыжок и приседание
+            if (InputOverrideHandler.isInputForced(BotInput.JUMP)) {
+                this.jumping = true
+            }
+            if (InputOverrideHandler.isInputForced(BotInput.SNEAK)) {
+                this.sneaking = true
+            }
+            
+            // Debug log
+            AquamixDrawBot.LOGGER.info(
+                "[AquamixInput] Applied: fwd=$forward, side=$sideways, jump=${this.jumping}"
+            )
         }
     }
 }
-

@@ -1,6 +1,7 @@
 package com.aquamix.drawbot.automation
 
 import com.aquamix.drawbot.AquamixDrawBot
+import com.aquamix.drawbot.anticheat.HumanSimulator
 import com.aquamix.drawbot.config.ModConfig
 import com.aquamix.drawbot.features.TelegramNotifier
 import com.aquamix.drawbot.navigation.RouteOptimizer
@@ -10,13 +11,15 @@ import net.minecraft.text.Text
 /**
  * Главный контроллер бота
  * Управляет всей логикой автоматизации
+ * 
+ * Улучшено: sealed class FSM, AgenticLoop самокоррекция, анти-чит задержки
  */
 class BotController {
     private val stateMachine = StateMachine()
     private val chunkBreaker = ChunkBreaker()
     private val flightController = FlightController()
     private val routeOptimizer = RouteOptimizer()
-    private val inventoryManager = InventoryManager()
+    val inventoryManager = InventoryManager()
     
     var isRunning = false
         private set
@@ -24,12 +27,24 @@ class BotController {
     // Очередь чанков для обработки
     private var chunksQueue: MutableList<ChunkPos> = mutableListOf()
     
+    init {
+        // Загружаем сохраненную очередь при запуске
+        val savedQueue = AquamixDrawBot.progressTracker.getQueuedChunks()
+        if (savedQueue.isNotEmpty()) {
+            chunksQueue.addAll(savedQueue)
+            AquamixDrawBot.LOGGER.info("Restored ${savedQueue.size} chunks from persistence")
+        }
+    }
+    
     // Завершённые чанки (для отображения на карте)
     private val completedChunks: MutableSet<ChunkPos> = mutableSetOf()
     
     // Статистика
     var totalChunksProcessed = 0
         private set
+    
+    // Флаг подтверждения для текущего состояния
+    private var confirmationReceived = false
     
     /**
      * Переключить состояние бота
@@ -47,8 +62,11 @@ class BotController {
             return
         }
         
+        val firstTarget = chunksQueue.firstOrNull() ?: return
+        
         isRunning = true
-        stateMachine.transition(BotState.FLYING_TO_CHUNK)
+        startTime = System.currentTimeMillis()
+        stateMachine.transition(BotState.FlyingToChunk(firstTarget))
         sendMessage("§a[DrawBot] Запущен! Чанков в очереди: ${chunksQueue.size}")
         
         AquamixDrawBot.LOGGER.info("Bot started with ${chunksQueue.size} chunks in queue")
@@ -61,8 +79,14 @@ class BotController {
     fun stop() {
         isRunning = false
         stateMachine.reset()
-        flightController.stopMovement(MinecraftClient.getInstance())
+        
+        val client = MinecraftClient.getInstance()
+        flightController.stopMovement(client)
         flightController.reset()
+        
+        // КЛЮЧЕВОЕ: восстановить оригинальный KeyboardInput
+        com.aquamix.drawbot.input.InputOverrideHandler.reset(client)
+        
         sendMessage("§e[DrawBot] Остановлен")
         
         AquamixDrawBot.LOGGER.info("Bot stopped. Processed: $totalChunksProcessed chunks")
@@ -80,6 +104,10 @@ class BotController {
         
         sendMessage("§a[DrawBot] Загружено ${chunks.size} чанков, маршрут оптимизирован")
         AquamixDrawBot.LOGGER.info("Loaded ${chunks.size} chunks, optimized route from $playerChunk")
+        
+        // Save
+        AquamixDrawBot.progressTracker.setQueuedChunks(chunksQueue)
+        AquamixDrawBot.progressTracker.save()
     }
     
     /**
@@ -94,144 +122,272 @@ class BotController {
         chunksQueue = routeOptimizer.optimize(chunksQueue, playerChunk).toMutableList()
         
         sendMessage("§a[DrawBot] Добавлено ${newChunks.size} чанков")
+        
+        // Save
+        AquamixDrawBot.progressTracker.setQueuedChunks(chunksQueue)
+        AquamixDrawBot.progressTracker.save()
     }
     
     /**
      * Главный цикл бота - вызывается каждый тик
+     * Использует sealed class matching для type-safe обработки состояний
      */
     fun tick(client: MinecraftClient) {
+        // КЛЮЧЕВОЕ: Baritone-style input replacement
+        // Заменяет player.input на BotMovementInput когда бот активен
+        com.aquamix.drawbot.input.InputOverrideHandler.onTick(client)
+        
         if (!isRunning) return
         
         val player = client.player ?: return
         val config = ModConfig.data
         
-        when (stateMachine.currentState) {
-            BotState.IDLE -> {
+        // CRITICAL: Check for falling and auto-recover
+        if (flightController.checkAndRecoverFromFall(client)) {
+            // Bot is recovering from fall, skip normal state handling
+            return
+        }
+        
+        when (val state = stateMachine.currentState) {
+            is BotState.Idle -> {
                 // Ничего не делаем
             }
             
-            BotState.FLYING_TO_CHUNK -> {
+            is BotState.FlyingToChunk -> {
                 // Проверка инвентаря перед вылетом
                 if (!inventoryManager.checkAndEquip(client)) {
-                    stop()
-                    TelegramNotifier.sendNotification("⚠️ Ошибка: Закончились БУРы (End Portal Frame)!")
+                    handleError(BotError.NoBurInInventory, state)
                     return
                 }
 
-                val target = chunksQueue.firstOrNull()
-                if (target == null) {
-                    sendMessage("§a[DrawBot] Все чанки обработаны! Всего: $totalChunksProcessed")
-                    TelegramNotifier.sendNotification("✅ Задача выполнена!\nОбработано чанков: $totalChunksProcessed")
-                    stop()
-                    return
-                }
-                
-                stateMachine.targetChunk = target
-                
                 // Активируем /fly
                 flightController.ensureFlyActive(client)
                 
                 // Летим к чанку
-                if (flightController.flyToChunk(client, target)) {
-                    AquamixDrawBot.LOGGER.debug("Arrived at chunk $target, landing...")
-                    stateMachine.transition(BotState.LANDING)
+                if (flightController.flyToChunk(client, state.target)) {
+                    AquamixDrawBot.LOGGER.debug("Arrived at chunk ${state.target}, landing...")
+                    stateMachine.transition(BotState.Landing(state.target))
                 }
             }
             
-            BotState.LANDING -> {
-                val target = stateMachine.targetChunk ?: return
-                
-                // Проверяем приземление
-                // Timeout 10s -> 5s для более быстрой реакции на застревание
-                if (flightController.landInChunk(client, target)) {
-                    AquamixDrawBot.LOGGER.debug("Landed in chunk $target")
-                    stateMachine.transition(BotState.PLACING_BUR)
+            is BotState.Landing -> {
+                // Проверяем приземление с таймаутом 5s
+                if (flightController.landInChunk(client, state.target)) {
+                    AquamixDrawBot.LOGGER.debug("Landed in chunk ${state.target}")
+                    stateMachine.transition(BotState.PlacingBur(state.target))
                 } else if (stateMachine.isTimedOut(5000)) {
-                    AquamixDrawBot.LOGGER.warn("Landing timeout, retrying...")
-                    stateMachine.transition(BotState.FLYING_TO_CHUNK)
+                    handleError(
+                        BotError.Timeout("landing", stateMachine.timeInState()),
+                        state
+                    )
                 }
             }
             
-            BotState.PLACING_BUR -> {
-                // Принудительно смотрим вниз для точной установки
-                client.player?.pitch = 90f
-                
-                // Пытаемся поставить БУР
-                if (chunkBreaker.placeBur(client)) {
-                    stateMachine.transition(BotState.WAITING_FOR_MENU)
+            is BotState.PlacingBur -> {
+                // Zero-Latency: Check immediately
+                val targetBlock = chunkBreaker.getTarget(client, state.target)
+                if (targetBlock != null) {
+                    // Don't update rotation here, let ChunkBreaker aim
+                    flightController.hoverAbove(client, targetBlock, updateRotation = false)
                 }
                 
-                // Таймаут уменьшен до 3 сек
+                // REMOVED: val humanDelay = HumanSimulator.randomDelay(100)
+                // Speed: GO GO GO
+                
+                if (chunkBreaker.placeBur(client, state.target)) {
+                    stateMachine.transition(BotState.WaitingForMenu(state.target))
+                }
+                
+                // Проверяем если меню уже открылось случайно (лагануло)
+                if (chunkBreaker.isBurMenuOpen(client)) {
+                    stateMachine.transition(BotState.WaitingForMenu(state.target))
+                }
+                
+                // Таймаут 3 сек - сбрасываем кэш и ищем дальше
                 if (stateMachine.isTimedOut(3000)) {
-                    if (stateMachine.incrementRetry() > 3) {
-                         // ... logic ...
-                        sendMessage("§c[DrawBot] Не удалось использовать БУР, пропускаем чанк")
-                        skipCurrentChunk()
-                    } else {
-                        stateMachine.transition(BotState.PLACING_BUR)
-                    }
+                    chunkBreaker.reset() // Clear cache and try again
+                    stateMachine.transition(BotState.PlacingBur(state.target, state.retryCount + 1))
                 }
             }
             
-            BotState.WAITING_FOR_MENU -> {
+            is BotState.WaitingForMenu -> {
+                // Stabilize position (Stop moving)
+                flightController.stopMovement(client)
+                
                 // Сразу проверяем меню
                 if (chunkBreaker.isBurMenuOpen(client)) {
-                    stateMachine.transition(BotState.CLICKING_MENU)
+                    stateMachine.transition(BotState.ClickingMenu(state.target))
                 }
                 
                 // Wait 2s max
                 if (stateMachine.isTimedOut(2000)) {
-                    AquamixDrawBot.LOGGER.warn("Menu timeout, retrying BUR placement")
-                    stateMachine.transition(BotState.PLACING_BUR)
+                    handleError(
+                        BotError.MenuNotFound(config.bur.menuTitle),
+                        state
+                    )
                 }
             }
             
-            BotState.CLICKING_MENU -> {
-                // Min delay reduced to quick click (1 tick or config dependent)
-                 // Если конфиг позволяет, делаем почти мгновенно
-                if (stateMachine.timeInState() < 50) { // 50ms hardcoded min
-                    return
-                }
+            is BotState.ClickingMenu -> {
+                // Stabilize position (Stop moving)
+                flightController.stopMovement(client)
+                
+                // REMOVED: val clickDelay = HumanSimulator.randomDelay(config.timing.menuClickDelay)
+                // Zero Latency Click
                 
                 if (chunkBreaker.clickBreakAll(client)) {
-                    stateMachine.transition(BotState.WAITING_CONFIRMATION)
+                    // USER REQUEST: Fly immediately, don't wait for confirmation
+                    chunkBreaker.closeMenu(client)
+                    completeCurrentChunk(state.target)
+                    
+                    val nextTarget = chunksQueue.firstOrNull()
+                    if (nextTarget != null) {
+                        flightController.sendFlyCommand(client)
+                        stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                    } else {
+                        finishTask()
+                    }
+                    return
                 }
                 
                 if (stateMachine.isTimedOut(3000)) {
                     chunkBreaker.closeMenu(client)
-                    stateMachine.transition(BotState.PLACING_BUR)
+                    handleError(
+                        BotError.ButtonNotFound(config.bur.breakButtonPattern),
+                        state
+                    )
                 }
             }
             
-            BotState.WAITING_CONFIRMATION -> {
-                // Закрываем меню быстро (100ms)
-                if (client.currentScreen != null && stateMachine.timeInState() > 100) {
+            is BotState.WaitingConfirmation -> {
+                // Stabilize position (Stop moving)
+                flightController.stopMovement(client)
+                
+                // Закрываем меню быстро
+                // REMOVED: val closeDelay = HumanSimulator.randomDelay(100)
+                if (client.currentScreen != null) {
                     chunkBreaker.closeMenu(client)
                 }
                 
-                val confirmed = stateMachine.getFlag("confirmed")
-                // Wait time reduced or taken from config
-                val waitTime = config.timing.chunkBreakWait.coerceAtMost(5000L) // Max 5s check
+                val waitTime = config.timing.chunkBreakWait.coerceAtMost(5000L)
                 
-                if (confirmed || stateMachine.timeInState() > waitTime) {
-                    val completed = stateMachine.targetChunk!!
-                    completedChunks.add(completed)
-                    chunksQueue.removeFirst()
-                    totalChunksProcessed++
+                if (confirmationReceived || stateMachine.timeInState() > waitTime) {
+                    completeCurrentChunk(state.target)
                     
-                    AquamixDrawBot.progressTracker.markCompleted(completed)
-                    AquamixDrawBot.progressTracker.save()
-                    
-                    sendMessage("§a[DrawBot] Чанк ${completed.x}, ${completed.z} сломан! Осталось: ${chunksQueue.size}")
-                    
-                    flightController.sendFlyCommand(client)
-                    stateMachine.transition(BotState.FLYING_TO_CHUNK)
+                    // Следующий чанк
+                    val nextTarget = chunksQueue.firstOrNull()
+                    if (nextTarget != null) {
+                        flightController.sendFlyCommand(client)
+                        stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                    } else {
+                        sendMessage("§a[DrawBot] Все чанки обработаны! Всего: $totalChunksProcessed")
+                        TelegramNotifier.sendNotification("✅ Задача выполнена!\nОбработано чанков: $totalChunksProcessed")
+                        stop()
+                    }
                 }
             }
             
-            BotState.MOVING_TO_NEXT -> {
-                stateMachine.transition(BotState.FLYING_TO_CHUNK)
+            is BotState.MovingToNext -> {
+                val nextTarget = chunksQueue.firstOrNull()
+                if (nextTarget != null) {
+                    stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                } else {
+                    stop()
+                }
             }
+            
+            is BotState.Ascending -> {
+                // Ascend to safe height with full pathfinding and obstacle avoidance
+                flightController.ensureFlyActive(client)
+                
+                // flightController.ascendSafely handles:
+                // 1. Pathfinding (if stuck/obstructed)
+                // 2. Obstacle avoidance
+                // 3. Staying centered locally (gentle nudge)
+                flightController.ascendSafely(client, state.targetHeight)
+                
+                // Check if reached target height
+                if (player.y >= state.targetHeight) {
+                    val nextTarget = chunksQueue.firstOrNull()
+                    if (nextTarget != null) {
+                        stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                    } else {
+                        finishTask()
+                    }
+                }
+                
+                // Timeout after 15s (increased from 10s for safer navigation)
+                if (stateMachine.isTimedOut(15000)) {
+                    AquamixDrawBot.LOGGER.warn("Ascending timeout, moving to next anyway")
+                    val nextTarget = chunksQueue.firstOrNull()
+                    if (nextTarget != null) {
+                        stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                    } else {
+                        finishTask()
+                    }
+                }
+            }
+            
+            is BotState.SelfHealing -> {
+                // Агентский цикл самокоррекции
+                AquamixDrawBot.LOGGER.info("[SelfHealing] Attempt ${state.healingAttempt}: ${state.error.message}")
+                
+                // Даём время на "размышление"
+                val thinkDelay = HumanSimulator.thinkingDelay(200, 500)
+                if (stateMachine.timeInState() < thinkDelay) return
+                
+                val recoveryState = AgenticLoop.handleError(
+                    state.error,
+                    state.previousState,
+                    state.healingAttempt
+                )
+                
+                if (recoveryState is BotState.Idle) {
+                    // NEVER GIVE UP - reset and retry from scratch
+                    sendMessage("§e[DrawBot] Макс попытки восстановления, сброс и перезапуск...")
+                    chunkBreaker.reset()
+                    val target = stateMachine.getTargetChunk() ?: return
+                    stateMachine.transition(BotState.PlacingBur(target, 0))
+                } else {
+                    stateMachine.transition(recoveryState)
+                }
+            }
+        }
+    }
+    
+    /**
+     * Обработка ошибки через AgenticLoop
+     */
+    private fun handleError(error: BotError, currentState: BotState) {
+        AquamixDrawBot.LOGGER.warn("[BotController] Error: ${error.message}")
+        
+        if (error is BotError.NoBurInInventory) {
+            stop()
+            TelegramNotifier.sendNotification("⚠️ Ошибка: Закончились БУРы (End Portal Frame)!")
+            return
+        }
+        
+        // Переходим в режим самокоррекции
+        stateMachine.transition(BotState.SelfHealing(error, currentState, 1))
+    }
+    
+    /**
+     * Завершить обработку текущего чанка
+     */
+    private fun completeCurrentChunk(chunk: ChunkPos) {
+        completedChunks.add(chunk)
+        chunksQueue.removeFirst()
+        totalChunksProcessed++
+        
+        AquamixDrawBot.progressTracker.markCompleted(chunk)
+        AquamixDrawBot.progressTracker.setQueuedChunks(chunksQueue) // Sync queue state
+        AquamixDrawBot.progressTracker.save()
+        
+        sendMessage("§a[DrawBot] Чанк ${chunk.x}, ${chunk.z} сломан! Осталось: ${chunksQueue.size}")
+        
+        // NEW: Ascend to safe height before moving to next chunk (prevents falling into broken chunks)
+        if (chunksQueue.isNotEmpty()) {
+            stateMachine.transition(BotState.Ascending(chunk))
         }
     }
     
@@ -246,20 +402,10 @@ class BotController {
         
         if (regex.containsMatchIn(message)) {
             AquamixDrawBot.LOGGER.debug("Confirmation received: $message")
-            stateMachine.setFlag("confirmed", true)
+            confirmationReceived = true
         }
     }
     
-    /**
-     * Пропустить текущий чанк
-     */
-    private fun skipCurrentChunk() {
-        if (chunksQueue.isNotEmpty()) {
-            val skipped = chunksQueue.removeFirst()
-            AquamixDrawBot.LOGGER.warn("Skipped chunk: $skipped")
-        }
-        stateMachine.transition(BotState.FLYING_TO_CHUNK)
-    }
     
     /**
      * Получить позицию игрока в координатах чанков
@@ -277,6 +423,59 @@ class BotController {
             Text.literal(text), false
         )
     }
+
+    /**
+     * Сканирует загруженные чанки и помечает "пустые" (выкопанные) как выполненные
+     * Вызывается из GUI карты
+     */
+    fun scanAndMarkMinedChunks(client: MinecraftClient) {
+        val world = client.world ?: return
+        val radius = client.options.viewDistance.value
+        val playerChunk = getPlayerChunkPos() ?: return
+        
+        var addedCount = 0
+        
+        for (dx in -radius..radius) {
+            for (dz in -radius..radius) {
+                val chunkX = playerChunk.x + dx
+                val chunkZ = playerChunk.z + dz
+                
+                if (world.chunkManager.isChunkLoaded(chunkX, chunkZ)) {
+                    val chunk = world.getChunk(chunkX, chunkZ)
+                    
+                    // Эвристика: если центральный блок чанка на высоте 0 (или ниже) - воздух/вода
+                    // Проверяем несколько точек для надежности
+                    var isEmpty = true
+                    for (x in 0..15 step 4) {
+                        for (z in 0..15 step 4) {
+                            val topY = chunk.getHeightmap(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING).get(x, z)
+                            // Если высота больше -50, значит там что-то еще есть (уровень моря 63, дно -64)
+                            if (topY > -50) {
+                                isEmpty = false
+                                break
+                            }
+                        }
+                        if (!isEmpty) break
+                    }
+                    
+                    if (isEmpty) {
+                        val pos = ChunkPos(chunkX, chunkZ)
+                        if (pos !in completedChunks) {
+                            completedChunks.add(pos)
+                            addedCount++
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (addedCount > 0) {
+            AquamixDrawBot.progressTracker.markBatchCompleted(completedChunks) // Нужно добавить этот метод в Tracker
+            AquamixDrawBot.progressTracker.save()
+            // sendMessage("§a[Scanner] Отмечено $addedCount чанков как выкопанные")
+        }
+    }
+
     
     // === Геттеры для GUI ===
     
@@ -286,12 +485,46 @@ class BotController {
     
     fun getCurrentState(): BotState = stateMachine.currentState
     
-    fun getTargetChunk(): ChunkPos? = stateMachine.targetChunk
+    fun getTargetChunk(): ChunkPos? = stateMachine.getTargetChunk()
     
     fun getQueueSize(): Int = chunksQueue.size
     
     fun clearCompleted() {
         completedChunks.clear()
+        AquamixDrawBot.progressTracker.clearCompleted()
+    }
+
+    // Таймер
+    private var startTime = 0L
+    
+    fun getFormattedDuration(): String {
+        if (!isRunning) return "00:00"
+        val duration = System.currentTimeMillis() - startTime
+        val seconds = duration / 1000
+        val s = seconds % 60
+        val m = (seconds / 60) % 60
+        val h = seconds / 3600
+        return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+    }
+
+    private fun finishTask() {
+        val duration = getFormattedDuration()
+        sendMessage("§a[DrawBot] Все чанки обработаны! Всего: $totalChunksProcessed")
+        sendMessage("§e[DrawBot] ⏱ Затрачено времени: $duration")
+        TelegramNotifier.sendNotification("✅ Задача выполнена!\nОбработано: $totalChunksProcessed\nВремя: $duration")
+        stop()
+    }
+
+    /**
+     * Полная очистка состояния (очередь, выполненные, прогресс)
+     * Используется кнопкой "Очистить" в GUI
+     */
+    fun clearAll() {
+        stop()
+        chunksQueue.clear()
+        completedChunks.clear()
         AquamixDrawBot.progressTracker.clear()
+        AquamixDrawBot.LOGGER.info("Bot state fully cleared")
+        sendMessage("§e[DrawBot] Прогресс и очередь очищены.")
     }
 }

@@ -1,41 +1,36 @@
 package com.aquamix.drawbot.input
 
+import com.aquamix.drawbot.AquamixDrawBot
+import net.minecraft.client.MinecraftClient
+import net.minecraft.client.input.Input
+import net.minecraft.client.input.KeyboardInput
+
 /**
- * Centralized handler for bot input overrides.
- * Based on Baritone's InputOverrideHandler pattern.
+ * Baritone-style InputOverrideHandler
  * 
- * Usage:
- *   InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true)
- *   InputOverrideHandler.clearAll()
+ * КЛЮЧЕВАЯ ЛОГИКА: В onTick() заменяем player.input на BotMovementInput когда бот активен,
+ * и восстанавливаем KeyboardInput когда бот неактивен.
+ * Это ТОЧНО как делает Baritone!
  */
 object InputOverrideHandler {
     
     private val forcedInputs = mutableMapOf<BotInput, Boolean>()
     
-    /**
-     * Check if a specific input is currently forced by the bot.
-     */
+    // Сохраняем оригинальный Input для восстановления
+    private var savedOriginalInput: Input? = null
+    
     fun isInputForced(input: BotInput): Boolean = forcedInputs[input] ?: false
     
-    /**
-     * Set the forced state of an input.
-     * @param input The input to control
-     * @param forced True to force the input down, false to release
-     */
     fun setInputForced(input: BotInput, forced: Boolean) {
         forcedInputs[input] = forced
     }
     
-    /**
-     * Clear all forced inputs. Call this when stopping the bot.
-     */
     fun clearAll() {
         forcedInputs.clear()
     }
     
     /**
-     * Returns true if the bot is currently forcing any movement inputs.
-     * Used to determine if we should be "in control" of the player.
+     * Проверяет, контролирует ли бот игрока (как Baritone inControl())
      */
     fun isInControl(): Boolean {
         return forcedInputs.any { (input, forced) -> 
@@ -48,8 +43,47 @@ object InputOverrideHandler {
     }
     
     /**
-     * Debug: Get current state as string
+     * КЛЮЧЕВОЙ МЕТОД - вызывается каждый тик!
+     * Заменяет player.input на BotMovementInput когда бот активен
+     * Это ТОЧНО как делает Baritone в onTick()
      */
+    fun onTick(client: MinecraftClient) {
+        val player = client.player ?: return
+        
+        if (isInControl()) {
+            // Бот активен - нужен BotMovementInput
+            if (player.input !is BotMovementInput) {
+                // Сохраняем оригинальный Input
+                savedOriginalInput = player.input
+                // Заменяем на наш
+                player.input = BotMovementInput()
+                AquamixDrawBot.LOGGER.info("[InputOverrideHandler] REPLACED player.input with BotMovementInput!")
+            }
+        } else {
+            // Бот НЕ активен - восстанавливаем оригинальный Input
+            if (player.input is BotMovementInput) {
+                // Восстанавливаем сохранённый или создаём новый KeyboardInput
+                player.input = savedOriginalInput ?: KeyboardInput(client.options)
+                AquamixDrawBot.LOGGER.info("[InputOverrideHandler] RESTORED original KeyboardInput!")
+                savedOriginalInput = null
+            }
+        }
+    }
+    
+    /**
+     * Полный сброс при остановке бота
+     */
+    fun reset(client: MinecraftClient) {
+        clearAll()
+        val player = client.player ?: return
+        
+        if (player.input is BotMovementInput) {
+            player.input = savedOriginalInput ?: KeyboardInput(client.options)
+            AquamixDrawBot.LOGGER.info("[InputOverrideHandler] RESET: restored KeyboardInput")
+        }
+        savedOriginalInput = null
+    }
+    
     fun getDebugState(): String {
         return forcedInputs.filter { it.value }.keys.joinToString(", ") { it.name }
     }

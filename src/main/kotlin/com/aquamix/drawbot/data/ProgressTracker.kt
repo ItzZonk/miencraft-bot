@@ -17,7 +17,8 @@ import kotlin.io.path.writeText
 data class ProgressData(
     val completedChunks: MutableSet<ChunkPos> = mutableSetOf(),
     var currentSchematicId: String? = null,
-    var totalProcessed: Int = 0
+    var totalProcessed: Int = 0,
+    val queuedChunks: MutableList<ChunkPos> = mutableListOf()
 )
 
 /**
@@ -43,7 +44,7 @@ class ProgressTracker {
             if (progressPath.exists()) {
                 val content = progressPath.readText()
                 data = json.decodeFromString(content)
-                AquamixDrawBot.LOGGER.info("Loaded progress: ${data.completedChunks.size} completed chunks")
+                AquamixDrawBot.LOGGER.info("Loaded progress: ${data.completedChunks.size} completed, ${data.queuedChunks.size} queued")
             }
         } catch (e: Exception) {
             AquamixDrawBot.LOGGER.error("Failed to load progress: ${e.message}")
@@ -72,6 +73,14 @@ class ProgressTracker {
     }
     
     /**
+     * Отметить группу чанков как выполненные
+     */
+    fun markBatchCompleted(chunks: Collection<ChunkPos>) {
+        val newChunks = chunks.filter { data.completedChunks.add(it) }
+        data.totalProcessed += newChunks.size
+    }
+    
+    /**
      * Проверить, выполнен ли чанк
      */
     fun isCompleted(chunk: ChunkPos): Boolean {
@@ -82,6 +91,19 @@ class ProgressTracker {
      * Получить все выполненные чанки
      */
     fun getCompletedChunks(): Set<ChunkPos> = data.completedChunks.toSet()
+    
+    /**
+     * Получить очередь чанков
+     */
+    fun getQueuedChunks(): List<ChunkPos> = data.queuedChunks.toList()
+    
+    /**
+     * Сохранить текущую очередь
+     */
+    fun setQueuedChunks(chunks: List<ChunkPos>) {
+        data.queuedChunks.clear()
+        data.queuedChunks.addAll(chunks)
+    }
     
     /**
      * Получить общее количество обработанных чанков

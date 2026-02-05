@@ -14,7 +14,8 @@ data class ModConfigData(
     val timing: TimingConfig = TimingConfig(),
     val navigation: NavigationConfig = NavigationConfig(),
     val bur: BurConfig = BurConfig(),
-    val telegram: TelegramConfig = TelegramConfig()
+    val telegram: TelegramConfig = TelegramConfig(),
+    val antiCheat: AntiCheatConfig = AntiCheatConfig()
 )
 
 @Serializable
@@ -44,6 +45,16 @@ data class TelegramConfig(
     var enabled: Boolean = false,
     var botToken: String = "",
     var chatId: String = ""
+)
+
+@Serializable
+data class AntiCheatConfig(
+    var enabled: Boolean = true,
+    var randomDelayEnabled: Boolean = true,
+    var delayVariation: Double = 0.3,      // ±30% variation
+    var mouseJitter: Boolean = true,
+    var mouseJitterAmount: Float = 0.3f,   // Максимальное отклонение в градусах
+    var brandSpoof: Boolean = false        // Отключено по умолчанию (опасно)
 )
 
 object ModConfig {

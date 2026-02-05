@@ -74,6 +74,14 @@ object AquamixDrawBot : ClientModInitializer {
         HudRenderCallback.EVENT.register(HudOverlay)
         WorldRenderEvents.AFTER_TRANSLUCENT.register(WorldRenderer)
         
+        // Регистрация фичей
+        com.aquamix.drawbot.features.CaptchaSolver.register()
+        
+        // Очистка кэша карты при выходе с сервера
+        net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.DISCONNECT.register { handler, client ->
+             com.aquamix.drawbot.render.MapTerrainCache.clear(client)
+        }
+        
         LOGGER.info("Aquamix Draw Bot initialized successfully!")
         LOGGER.info("Press M to open chunk map, B to toggle bot")
     }

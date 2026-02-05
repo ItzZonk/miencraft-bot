@@ -69,6 +69,14 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
     private val colorTextDim = 0xFFaaaaaa.toInt()
     private val colorVoid = 0xFF000000.toInt()
     
+    // Block Brush
+    private var brushWidth = 1
+    private var brushHeight = 1
+    
+    // Scanner Timer
+    private var scanTickCounter = 0
+
+    
     override fun init() {
         super.init()
         
@@ -117,7 +125,7 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
         // Кнопка загрузки
         addDrawableChild(ButtonWidget.builder(Text.literal("📂 Загрузить")) { openLoadDialog() }
             .dimensions(buttonX, buttonY, 90, buttonHeight).build())
-        
+            
         // Кнопка переключения режима
         val modeText = if (mapMode == MapMode.SIMPLE) "🗺 Схема" else "🌍 Террейн"
         modeButton = ButtonWidget.builder(Text.literal(modeText)) { toggleMapMode() }
@@ -133,6 +141,45 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
         // Кнопка центрирования на игроке
         addDrawableChild(ButtonWidget.builder(Text.literal("⌖")) { centerOnPlayer() }
             .dimensions(width - 35, 75, 25, 25).build())
+            
+        // --- Brush Controls ---
+        var rightY = 110
+        val rightX = width - 80
+        
+        // Label
+        addDrawableChild(ButtonWidget.builder(Text.literal("Кисть: ${brushWidth}x${brushHeight}")) { }
+            .dimensions(rightX, rightY, 70, 20).build().apply { active = false })
+        
+        rightY += 25
+        
+        // Width
+        addDrawableChild(ButtonWidget.builder(Text.literal("W-")) { 
+            brushWidth = (brushWidth - 1).coerceAtLeast(1)
+            refreshInit()
+        }.dimensions(rightX, rightY, 35, 20).build())
+        
+        addDrawableChild(ButtonWidget.builder(Text.literal("W+")) { 
+            brushWidth = (brushWidth + 1).coerceAtMost(32)
+            refreshInit()
+        }.dimensions(rightX + 35, rightY, 35, 20).build())
+        
+        rightY += 25
+        
+        // Height
+        addDrawableChild(ButtonWidget.builder(Text.literal("H-")) { 
+            brushHeight = (brushHeight - 1).coerceAtLeast(1)
+            refreshInit()
+        }.dimensions(rightX, rightY, 35, 20).build())
+        
+        addDrawableChild(ButtonWidget.builder(Text.literal("H+")) { 
+            brushHeight = (brushHeight + 1).coerceAtMost(32)
+            refreshInit()
+        }.dimensions(rightX + 35, rightY, 35, 20).build())
+    }
+    
+    private fun refreshInit() {
+        clearChildren()
+        init()
     }
     
     private fun toggleMapMode() {
@@ -156,225 +203,125 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
         val currentTarget = controller.getTargetChunk()
         val world = client?.world
         
-        // Рисуем чанки
-        for (dx in -visibleRadius..visibleRadius) {
-            for (dz in -visibleRadius..visibleRadius) {
+        // Auto-Scan (every ~1 sec)
+        if (scanTickCounter++ % 20 == 0) {
+             AquamixDrawBot.botController.scanAndMarkMinedChunks(client!!)
+        }
+
+        // --- RENDER LOOP ---
+        // We always loop through visible chunks to show the map/terrain.
+        // Optimization: When zoomed out, we disable the Grid and Fancy Overlays (Borders).
+        
+        val isZoomedOut = zoom < 0.5
+        val renderRadius = if (isZoomedOut) visibleRadius else visibleRadius.coerceAtMost(32)
+        
+        for (dx in -renderRadius..renderRadius) {
+            for (dz in -renderRadius..renderRadius) {
                 val chunkX = (offsetX + dx).toInt()
                 val chunkZ = (offsetZ + dz).toInt()
                 
                 val screenX = centerX + ((chunkX - offsetX) * chunkSize).toInt()
                 val screenY = centerY + ((chunkZ - offsetZ) * chunkSize).toInt()
                 
-                // Пропускаем чанки за пределами экрана
+                // Culling
                 if (screenX + chunkSize < 0 || screenX > width ||
                     screenY + chunkSize < 0 || screenY > height) continue
                 
                 val chunkPos = ChunkPos(chunkX, chunkZ)
                 val size = chunkSize
                 
-                // Рендеринг содержимого чанка
+                // 1. Render Content (Terrain or Simple)
                 if (mapMode == MapMode.TERRAIN && world != null) {
-                    if (world.chunkManager.isChunkLoaded(chunkX, chunkZ)) {
-                        terrainRenderer.renderChunk(context, chunkX, chunkZ, screenX, screenY, size)
+                    val textureId = com.aquamix.drawbot.render.MapTerrainCache.getTextureId(client!!, chunkX, chunkZ)
+                    if (textureId != null) {
+                        context.drawTexture(textureId, screenX, screenY, size, size, 0f, 0f, 16, 16, 16, 16)
                     } else {
+                         // Unloaded void
                         context.fill(screenX, screenY, screenX + size, screenY + size, colorVoid)
                     }
                 } else {
                     // Simple Mode Background
-                    val baseColor = if (mapMode == MapMode.SIMPLE) colorChunkDefault else 0x00000000
-                    if (baseColor != 0) {
-                        context.fill(screenX + 1, screenY + 1, screenX + size, screenY + size, baseColor)
+                    if (colorChunkDefault != 0) {
+                         context.fill(screenX + 1, screenY + 1, screenX + size, screenY + size, colorChunkDefault)
                     }
                 }
                 
-                // Наложение статуса (Overlay)
-                var overlayColor = 0
+                // 2. Overlay Status
+                var baseColor = 0
                 when {
-                    currentTarget == chunkPos -> overlayColor = colorChunkCurrent
-                    chunkPos in completedChunks -> overlayColor = colorChunkCompleted
-                    chunkPos in queuedChunks -> overlayColor = colorChunkQueued
-                    chunkPos in selectedChunks -> overlayColor = colorChunkSelected
+                    currentTarget == chunkPos -> baseColor = colorChunkCurrent
+                    chunkPos in completedChunks -> baseColor = colorChunkCompleted
+                    chunkPos in queuedChunks -> baseColor = colorChunkQueued
+                    chunkPos in selectedChunks -> baseColor = colorChunkSelected
                 }
                 
-                if (overlayColor != 0) {
-                    val alpha = if (mapMode == MapMode.TERRAIN) 0x66000000.toInt() else 0xFF000000.toInt()
-                    val finalColor = (overlayColor and 0x00FFFFFF) or alpha
-                    context.fill(screenX, screenY, screenX + size, screenY + size, finalColor)
+                if (baseColor != 0) {
+                    if (!isZoomedOut && mapMode == MapMode.TERRAIN) {
+                         // Modern: Border + Tint (Only when zoomed in)
+                         val tintAlpha = 0x44 
+                         val tintColor = (baseColor and 0x00FFFFFF) or (tintAlpha shl 24)
+                         context.fill(screenX, screenY, screenX + size, screenY + size, tintColor)
+                         
+                         val borderColor = (baseColor and 0x00FFFFFF) or 0xFF000000.toInt()
+                         context.drawBorder(screenX, screenY, size, size, borderColor)
+                    } else {
+                         // Simple: Solid Fill (Zoomed out OR Simple mode)
+                         // If we are zoomed out, we want clear visibility, so full fill is better/faster
+                         context.fill(screenX, screenY, screenX + size, screenY + size, baseColor)
+                    }
                 }
                 
-                // Сетка
-                if (mapMode == MapMode.SIMPLE || size >= 32) {
-                     val gridColor = if (mapMode == MapMode.TERRAIN) 0x44000000.toInt() else colorGrid
-                     context.fill(screenX + size, screenY, screenX + size + 1, screenY + size + 1, gridColor)
-                     context.fill(screenX, screenY + size, screenX + size + 1, screenY + size + 1, gridColor)
+                // 3. Grid Lines
+                // OPTIMIZATION: Hide grid when zoomed out or too small
+                if (!isZoomedOut && chunkSize > 4) {
+                    context.drawBorder(screenX, screenY, size, size, colorGrid)
                 }
             }
         }
+
+
         
-        // Рисуем прямоугольник выделения
-        if (isSelecting && selectStartChunk != null) {
-            val currentChunk = screenToChunk(mouseX.toDouble(), mouseY.toDouble())
-            drawSelectionRect(context, selectStartChunk!!, currentChunk, centerX, centerY)
+        // Brush Preview (Visual Feedback)
+        // Show what chunks would be selected if clicked
+        if (!isSelecting && (brushWidth > 1 || brushHeight > 1)) {
+             drawBrushPreview(context, screenToChunk(mouseX.toDouble(), mouseY.toDouble()), centerX, centerY)
         }
         
-        // Рисуем позицию игрока
+        // Рисуем выделение прямоугольником
+        if (isSelecting && selectStartChunk != null) {
+            drawSelectionRect(context, selectStartChunk!!, screenToChunk(mouseX.toDouble(), mouseY.toDouble()), centerX, centerY)
+        }
+        
+        // Рисуем игрока
         client?.player?.let { player ->
             val playerChunkX = player.blockPos.x shr 4
             val playerChunkZ = player.blockPos.z shr 4
             
-            // Позиция внутри чанка (0-1)
-            val inChunkX = (player.x % 16) / 16.0
-            val inChunkZ = (player.z % 16) / 16.0
+            val playerScreenX = centerX + ((playerChunkX - offsetX) * chunkSize).toInt()
+            val playerScreenY = centerY + ((playerChunkZ - offsetZ) * chunkSize).toInt()
             
-            val playerScreenX = centerX + ((playerChunkX - offsetX + inChunkX) * chunkSize).toInt()
-            val playerScreenZ = centerY + ((playerChunkZ - offsetZ + inChunkZ) * chunkSize).toInt()
+            val playerBlockX = player.blockPos.x % 16
+            val playerBlockZ = player.blockPos.z % 16
             
-            // Маркер игрока
-            val markerSize = 6
-            context.fill(
-                playerScreenX - markerSize, playerScreenZ - markerSize,
-                playerScreenX + markerSize, playerScreenZ + markerSize,
-                colorPlayer
-            )
+            val playerPixelX = playerScreenX + (playerBlockX / 16.0 * chunkSize).toInt()
+            val playerPixelY = playerScreenY + (playerBlockZ / 16.0 * chunkSize).toInt()
             
-            // Направление
-            val yawRad = Math.toRadians(player.yaw.toDouble() + 180)
-            val dirX = (kotlin.math.sin(yawRad) * 12).toInt()
-            val dirZ = (-kotlin.math.cos(yawRad) * 12).toInt()
-            context.fill(
-                playerScreenX + dirX - 2, playerScreenZ + dirZ - 2,
-                playerScreenX + dirX + 2, playerScreenZ + dirZ + 2,
-                colorPlayer
-            )
+            context.fill(playerPixelX - 2, playerPixelY - 2, playerPixelX + 3, playerPixelY + 3, colorPlayer)
         }
         
+        // Информационная панель
         renderInfoPanel(context, mouseX, mouseY)
         
+        // Player Marker & Super Render
         super.render(context, mouseX, mouseY, delta)
     }
 
     // --- Terrain Optimization ---
-    private val terrainRenderer = TerrainRenderer()
+    // Moved to global MapTerrainCache for persistence
     
-    override fun close() {
-        terrainRenderer.clear() // Освобождаем текстуры
-        super.close()
-    }
-    
-    private inner class TerrainRenderer {
-        private val textures = mutableMapOf<ChunkPos, net.minecraft.client.texture.NativeImageBackedTexture>()
-        private val identifiers = mutableMapOf<ChunkPos, net.minecraft.util.Identifier>()
-        
-        fun renderChunk(context: DrawContext, chunkX: Int, chunkZ: Int, x: Int, y: Int, size: Int) {
-            val pos = ChunkPos(chunkX, chunkZ)
-            
-            // Получаем или создаем текстуру
-            val identifier = identifiers.getOrPut(pos) {
-                val texture = generateTexture(chunkX, chunkZ)
-                textures[pos] = texture
-                val id = client!!.textureManager.registerDynamicTexture("chunk_${chunkX}_${chunkZ}", texture)
-                id
-            }
-            
-            // Рисуем текстуру целиком
-            context.drawTexture(identifier, x, y, size, size, 0f, 0f, 16, 16, 16, 16)
-        }
-        
-        private fun generateTexture(chunkX: Int, chunkZ: Int): net.minecraft.client.texture.NativeImageBackedTexture {
-            val img = net.minecraft.client.texture.NativeImage(16, 16, true)
-            val world = client!!.world!!
-            val heights = IntArray(256)
-            
-            // 1. Сначала собираем высоты для теней
-            for (z in 0 until 16) {
-                for (x in 0 until 16) {
-                    val worldX = chunkX * 16 + x
-                    val worldZ = chunkZ * 16 + z
-                    heights[z * 16 + x] = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ)
-                }
-            }
-            
-            // 2. Генерируем пиксели
-            for (z in 0 until 16) {
-                for (x in 0 until 16) {
-                    val idx = z * 16 + x
-                    val h = heights[idx]
-                    
-                    val worldX = chunkX * 16 + x
-                    val worldZ = chunkZ * 16 + z
-                    val blockPos = net.minecraft.util.math.BlockPos(worldX, h - 1, worldZ)
-                    
-                    val state = world.getBlockState(blockPos)
-                    val mapColor = state.getMapColor(world, blockPos)
-                    
-                    // Базовый цвет
-                    if (mapColor == MapColor.CLEAR) {
-                        img.setColor(x, z, 0) // Прозрачный
-                        continue
-                    }
-                    
-                    var color = mapColor.color
-                    
-                    // --- Effects ---
-                    
-                    // 1. Shading (Тени от высоты)
-                    // Сравниваем с блоком выше (z-1)
-                    var shading = 0
-                    if (z > 0) {
-                        val hAbove = heights[(z - 1) * 16 + x]
-                        if (h < hAbove) shading = -15 // Темнее
-                        if (h > hAbove) shading = 15 // Светлее
-                    }
-                    
-                    // Применяем шейдинг
-                    val r = ((color shr 16) and 0xFF) + shading
-                    val g = ((color shr 8) and 0xFF) + shading
-                    val b = (color and 0xFF) + shading
-                    
-                    // Clamp
-                    val finalR = r.coerceIn(0, 255)
-                    val finalG = g.coerceIn(0, 255)
-                    val finalB = b.coerceIn(0, 255)
-                    
-                    // Упаковка цвета (RGBA / ABGR)
-                    // NativeImage.setColor обычно принимает ABGR
-                    // MapColor.color это int ARGB (или RGB)
-                    // Нам нужно 0xAABBGGRR (Little Endian)
-                    
-                    // Alpha = 255 (Fully Opaque)
-                    var alpha = 0xFF
-                    
-                    // Water Transparency (MapColor.BLUE usually around ID 12)
-                    // Простая проверка по цвету (около синего)
-                    if (mapColor == MapColor.OAK_TAN || mapColor == MapColor.WATER_BLUE || mapColorIdIsWater(mapColor)) {
-                         alpha = 0xAA // Semi transparency
-                    }
-                    
-                    val finalColor = (alpha shl 24) or (finalB shl 16) or (finalG shl 8) or finalR
-                    
-                    img.setColor(x, z, finalColor)
-                }
-            }
-            
-            val texture = net.minecraft.client.texture.NativeImageBackedTexture(img)
-            return texture
-        }
-        
-        // Helper to guess water
-        private fun mapColorIdIsWater(color: MapColor): Boolean {
-             return color.id == 12 // Water
-        }
-        
-        fun clear() {
-            // Освобождаем ресурсы
-            identifiers.forEach { (_, id) -> 
-                 client!!.textureManager.destroyTexture(id)
-            }
-            textures.forEach { (_, tex) -> tex.close() }
-            textures.clear()
-            identifiers.clear()
-        }
-    }
+    // override fun close() {
+    //    super.close()
+    // }
     
     // ... Rest of existing methods (renderInfoPanel, etc.)
     private fun renderInfoPanel(context: DrawContext, mouseX: Int, mouseY: Int) {
@@ -410,19 +357,48 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
         val minZ = minOf(start.z, end.z)
         val maxZ = maxOf(start.z, end.z)
         
+        drawRectArea(context, minX, maxX, minZ, maxZ, centerX, centerY, colorChunkSelected, true)
+    }
+    
+    private fun drawBrushPreview(context: DrawContext, startChunk: ChunkPos, centerX: Int, centerY: Int) {
+         // Brush extends +X and +Z from start
+         val minX = startChunk.x
+         val maxX = startChunk.x + brushWidth - 1
+         val minZ = startChunk.z
+         val maxZ = startChunk.z + brushHeight - 1
+         
+         // Use a lighter/different color for preview (e.g., white with alpha)
+         val previewColor = 0xFFFFFFFF.toInt()
+         drawRectArea(context, minX, maxX, minZ, maxZ, centerX, centerY, previewColor, false)
+    }
+    
+    private fun drawRectArea(context: DrawContext, minX: Int, maxX: Int, minZ: Int, maxZ: Int, centerX: Int, centerY: Int, color: Int, isSelection: Boolean) {
         val screenX1 = centerX + ((minX - offsetX) * chunkSize).toInt()
         val screenY1 = centerY + ((minZ - offsetZ) * chunkSize).toInt()
         val screenX2 = centerX + ((maxX + 1 - offsetX) * chunkSize).toInt()
         val screenY2 = centerY + ((maxZ + 1 - offsetZ) * chunkSize).toInt()
         
-        context.fill(screenX1, screenY1, screenX2, screenY2, 0x44ff4757)
+        val fillAlpha = if (isSelection) 0x44 else 0x33
+        val fillColor = (color and 0x00FFFFFF) or (fillAlpha shl 24)
         
-        context.fill(screenX1, screenY1, screenX2, screenY1 + 2, colorChunkSelected)
-        context.fill(screenX1, screenY2 - 2, screenX2, screenY2, colorChunkSelected)
-        context.fill(screenX1, screenY1, screenX1 + 2, screenY2, colorChunkSelected)
-        context.fill(screenX2 - 2, screenY1, screenX2, screenY2, colorChunkSelected)
+        context.fill(screenX1, screenY1, screenX2, screenY2, fillColor)
+        
+        if (isSelection) {
+             context.fill(screenX1, screenY1, screenX2, screenY1 + 2, color)
+             context.fill(screenX1, screenY2 - 2, screenX2, screenY2, color)
+             context.fill(screenX1, screenY1, screenX1 + 2, screenY2, color)
+             context.fill(screenX2 - 2, screenY1, screenX2, screenY2, color)
+        } else {
+             // Dotted border or simpler for brush preview
+             val borderC = (color and 0x00FFFFFF) or 0x88000000.toInt() // Semi-transparent border
+             context.drawBorder(screenX1, screenY1, screenX2 - screenX1, screenY2 - screenY1, borderC)
+        }
     }
     
+    // Paint Selection (Drag to select)
+    private var isPainting = false
+    private var paintAddMode = true // true = add, false = remove
+
     override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
         if (super.mouseClicked(mouseX, mouseY, button)) return true
         
@@ -434,12 +410,14 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
                     isSelecting = true
                     selectStartChunk = screenToChunk(mouseX, mouseY)
                 } else {
+                    // Start Painting with Brush
+                    isPainting = true
                     val chunk = screenToChunk(mouseX, mouseY)
-                    if (chunk in selectedChunks) {
-                        selectedChunks.remove(chunk)
-                    } else {
-                        selectedChunks.add(chunk)
-                    }
+                    
+                    // Determine mode: if clicking on selected -> remove mode. Else add mode.
+                    paintAddMode = chunk !in selectedChunks
+                    
+                    applyBrush(chunk, paintAddMode)
                 }
                 return true
             }
@@ -465,6 +443,7 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
     override fun mouseReleased(mouseX: Double, mouseY: Double, button: Int): Boolean {
         when (button) {
             0 -> {
+                isPainting = false // Stop painting
                 if (isSelecting && selectStartChunk != null) {
                     val endChunk = screenToChunk(mouseX, mouseY)
                     val minX = minOf(selectStartChunk!!.x, endChunk.x)
@@ -490,6 +469,12 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
     }
     
     override fun mouseDragged(mouseX: Double, mouseY: Double, button: Int, deltaX: Double, deltaY: Double): Boolean {
+        if (button == 0 && isPainting && !hasShiftDown()) {
+            val chunk = screenToChunk(mouseX, mouseY)
+            applyBrush(chunk, paintAddMode)
+            return true
+        }
+        
         if (isDragging && button == 1) {
             val dx = (mouseX - dragStartX) / chunkSize
             val dz = (mouseY - dragStartY) / chunkSize
@@ -498,6 +483,19 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
             return true
         }
         return super.mouseDragged(mouseX, mouseY, button, deltaX, deltaY)
+    }
+    
+    private fun applyBrush(startChunk: ChunkPos, add: Boolean) {
+        for (dx in 0 until brushWidth) {
+            for (dz in 0 until brushHeight) {
+                val chunk = ChunkPos(startChunk.x + dx, startChunk.z + dz)
+                if (add) {
+                    selectedChunks.add(chunk)
+                } else {
+                    selectedChunks.remove(chunk)
+                }
+            }
+        }
     }
     
     override fun mouseScrolled(mouseX: Double, mouseY: Double, horizontalAmount: Double, verticalAmount: Double): Boolean {
@@ -533,6 +531,7 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
     
     private fun clearSelection() {
         selectedChunks.clear()
+        AquamixDrawBot.botController.clearAll()
     }
     
     private fun centerOnPlayer() {
