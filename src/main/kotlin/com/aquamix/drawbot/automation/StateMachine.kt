@@ -20,6 +20,11 @@ sealed interface BotState {
     data class FlyingToChunk(val target: ChunkPos) : BotState {
         override val displayName = "Полёт к чанку"
     }
+
+    /** Полёт к конкретному блоку (оптимизация) */
+    data class FlyingToBlock(val targetChunk: ChunkPos, val targetBlock: net.minecraft.util.math.BlockPos) : BotState {
+        override val displayName = "Полёт к точке"
+    }
     
     /** Приземление в целевом чанке */
     data class Landing(val target: ChunkPos) : BotState {
@@ -159,6 +164,7 @@ class StateMachine {
      */
     fun getTargetChunk(): ChunkPos? = when (val state = currentState) {
         is BotState.FlyingToChunk -> state.target
+        is BotState.FlyingToBlock -> state.targetChunk
         is BotState.Landing -> state.target
         is BotState.PlacingBur -> state.target
         is BotState.WaitingForMenu -> state.target
@@ -172,6 +178,7 @@ class StateMachine {
     
     private fun getTargetFromState(state: BotState): ChunkPos? = when (state) {
         is BotState.FlyingToChunk -> state.target
+        is BotState.FlyingToBlock -> state.targetChunk
         is BotState.Landing -> state.target
         is BotState.PlacingBur -> state.target
         is BotState.WaitingForMenu -> state.target

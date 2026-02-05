@@ -163,10 +163,36 @@ class BotController {
                 // Активируем /fly
                 flightController.ensureFlyActive(client)
                 
-                // Летим к чанку
+                // OPTIMIZATION: Check if we can see a target block NOW (chunk loaded while flying)
+                // If yes, switch to precise Block Flight immediately!
+                if (client.world != null && client.world!!.chunkManager.isChunkLoaded(state.target.x, state.target.z)) {
+                    val targetBlock = chunkBreaker.getTarget(client, state.target)
+                    if (targetBlock != null) {
+                         AquamixDrawBot.LOGGER.info("Mid-flight optimization: Found block ${targetBlock.toShortString()}, switching to direct flight!")
+                         stateMachine.transition(BotState.FlyingToBlock(state.target, targetBlock))
+                         return
+                    }
+                }
+                
+                // Летим к чанку (fallback if no block found yet)
                 if (flightController.flyToChunk(client, state.target)) {
-                    AquamixDrawBot.LOGGER.debug("Arrived at chunk ${state.target}, landing...")
-                    stateMachine.transition(BotState.Landing(state.target))
+                    AquamixDrawBot.LOGGER.debug("Arrived at chunk ${state.target}, finding target...")
+                    // Skip Landing - go straight to placing (which will find target)
+                    stateMachine.transition(BotState.PlacingBur(state.target))
+                }
+            }
+            
+            is BotState.FlyingToBlock -> {
+                if (!inventoryManager.checkAndEquip(client)) {
+                    handleError(BotError.NoBurInInventory, state)
+                    return
+                }
+                flightController.ensureFlyActive(client)
+                
+                if (flightController.flyToBlock(client, state.targetBlock)) {
+                    AquamixDrawBot.LOGGER.debug("Directly arrived at block ${state.targetBlock} in chunk ${state.targetChunk}")
+                    // We are at the block, skip Landing state and go straight to placing
+                    stateMachine.transition(BotState.PlacingBur(state.targetChunk))
                 }
             }
             
@@ -206,7 +232,23 @@ class BotController {
                 // Таймаут 3 сек - сбрасываем кэш и ищем дальше
                 if (stateMachine.isTimedOut(3000)) {
                     chunkBreaker.reset() // Clear cache and try again
-                    stateMachine.transition(BotState.PlacingBur(state.target, state.retryCount + 1))
+                    
+                    // Max 10 retries - if still no valid block, skip this chunk
+                    if (state.retryCount >= 10) {
+                        AquamixDrawBot.LOGGER.warn("Chunk ${state.target} has no valid blocks after 10 retries, skipping!")
+                        sendMessage("§e[DrawBot] Пропускаю чанк ${state.target} - нет подходящих блоков")
+                        completedChunks.add(state.target)
+                        chunksQueue.remove(state.target)
+                        val nextTarget = chunksQueue.firstOrNull()
+                        if (nextTarget != null) {
+                            stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                        } else {
+                            stateMachine.transition(BotState.Idle)
+                            sendMessage("§a[DrawBot] Все чанки обработаны!")
+                        }
+                    } else {
+                        stateMachine.transition(BotState.PlacingBur(state.target, state.retryCount + 1))
+                    }
                 }
             }
             
@@ -219,8 +261,8 @@ class BotController {
                     stateMachine.transition(BotState.ClickingMenu(state.target))
                 }
                 
-                // Wait 2s max
-                if (stateMachine.isTimedOut(2000)) {
+                // Wait 5s max (increased for lag)
+                if (stateMachine.isTimedOut(5000)) {
                     handleError(
                         BotError.MenuNotFound(config.bur.menuTitle),
                         state
@@ -269,7 +311,7 @@ class BotController {
                     chunkBreaker.closeMenu(client)
                 }
                 
-                val waitTime = config.timing.chunkBreakWait.coerceAtMost(5000L)
+                val waitTime = config.timing.chunkBreakWait.coerceAtMost(100L)
                 
                 if (confirmationReceived || stateMachine.timeInState() > waitTime) {
                     completeCurrentChunk(state.target)
@@ -385,9 +427,39 @@ class BotController {
         
         sendMessage("§a[DrawBot] Чанк ${chunk.x}, ${chunk.z} сломан! Осталось: ${chunksQueue.size}")
         
-        // NEW: Ascend to safe height before moving to next chunk (prevents falling into broken chunks)
+        // REMOVED: Ascend to safe height. Now we fly directly.
         if (chunksQueue.isNotEmpty()) {
-            stateMachine.transition(BotState.Ascending(chunk))
+            val nextTarget = chunksQueue.firstOrNull()
+            if (nextTarget != null) {
+                // OPTIMIZATION: Try to find target block in next chunk NOW (while in current chunk)
+                // This allows flying directly to the block instead of the chunk center
+                val client = MinecraftClient.getInstance()
+                // We reset chunk breaker to ensure we look for a new target
+                chunkBreaker.reset()
+                
+                // Note: We might be too far to load the chunk fully or find the block if it's not rendered.
+                // But if we can find it, it's a huge speedup.
+                // We pass the nextChunk to getTarget. 
+                // Since 'getTarget' uses world.getBlockState, it works if chunk is loaded.
+                
+                // Just peek, don't force exhaustive scan yet if not loaded
+                val world = client.world
+                if (world != null && world.chunkManager.isChunkLoaded(nextTarget.x, nextTarget.z)) {
+                    val targetBlock = chunkBreaker.getTarget(client, nextTarget)
+                    if (targetBlock != null) {
+                         AquamixDrawBot.LOGGER.info("Optimized flight: Direct to block ${targetBlock.toShortString()}")
+                         stateMachine.transition(BotState.FlyingToBlock(nextTarget, targetBlock))
+                    } else {
+                         stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                    }
+                } else {
+                    stateMachine.transition(BotState.FlyingToChunk(nextTarget))
+                }
+            } else {
+                finishTask()
+            }
+        } else {
+            finishTask()
         }
     }
     
@@ -478,6 +550,20 @@ class BotController {
 
     
     // === Геттеры для GUI ===
+    
+    /**
+     * Toggle chunk completion status manually (for map UI)
+     */
+    fun toggleChunkCompletion(chunk: ChunkPos) {
+        if (chunk in completedChunks) {
+            completedChunks.remove(chunk)
+            AquamixDrawBot.LOGGER.info("Chunk $chunk marked as NOT completed")
+        } else {
+            completedChunks.add(chunk)
+            chunksQueue.remove(chunk) // Also remove from queue if present
+            AquamixDrawBot.LOGGER.info("Chunk $chunk marked as COMPLETED")
+        }
+    }
     
     fun getCompletedChunks(): Set<ChunkPos> = completedChunks.toSet()
     

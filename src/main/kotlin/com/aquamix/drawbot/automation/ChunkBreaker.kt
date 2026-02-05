@@ -37,6 +37,7 @@ class ChunkBreaker {
         targetRotationDone = false
         currentScanIndex = 0
         scanAttempts = 0
+        failedBlocks.clear()
     }
     
     /**
@@ -76,7 +77,7 @@ class ChunkBreaker {
         // 2. Проверяем препятствие сверху
         val blockAbove = targetBlock.up()
         val stateAbove = world.getBlockState(blockAbove)
-        val isWater = stateAbove.fluidState.isStill && !stateAbove.block.name.string.contains("Lava")
+        val isWater = !stateAbove.fluidState.isEmpty && !stateAbove.block.name.string.contains("Lava")
         val isReplaceable = stateAbove.isReplaceable || stateAbove.block.name.string.contains("grass", ignoreCase = true) || 
                             stateAbove.block.name.string.contains("plant", ignoreCase = true) ||
                             stateAbove.block.name.string.contains("flower", ignoreCase = true) ||
@@ -98,36 +99,31 @@ class ChunkBreaker {
             return false
         }
         
-        if (isReplaceable && !stateAbove.isAir) {
-            // Grass/plant - break with BUR in hand
-            val inventory = player.inventory
-            var burSlot = -1
+        // IF replaceable/water: Just fall through to Placement (Right Click) logic
+        // We DO NOT attack grass/water anymore.
+
+        
+        // 2.5 Check if BUR is already placed (End Portal Frame)
+        if (stateAbove.block == net.minecraft.block.Blocks.END_PORTAL_FRAME) {
+            AquamixDrawBot.LOGGER.info("Found existing BUR at ${blockAbove.toShortString()}, reusing!")
             
-            for (i in 0..8) {
-                val stack = inventory.getStack(i)
-                if (stack.item == Items.END_PORTAL_FRAME) {
-                    burSlot = i
-                    break
-                }
-            }
+            // Just interact with it to open menu
+            val hitResult = BlockHitResult(
+                Vec3d.ofCenter(blockAbove),
+                Direction.UP,
+                blockAbove,
+                false
+            )
             
-            if (burSlot == -1) {
-                AquamixDrawBot.LOGGER.warn("BUR not found in hotbar!")
-                return false
-            }
-            
-            if (inventory.selectedSlot != burSlot) {
-                inventory.selectedSlot = burSlot
-                markAction()
-                return false
-            }
-            
-            // Break grass/plant
             lookAt(player, blockAbove)
-            interactionManager.attackBlock(blockAbove, Direction.UP)
+            
+            // Interact
+            interactionManager.interactBlock(player, Hand.MAIN_HAND, hitResult)
             player.swingHand(Hand.MAIN_HAND)
             markAction()
-            return false
+            
+            // We consider this a success for "placing" step, as it leads to menu opening
+            return true 
         }
         
         // 3. Ставим БУР
@@ -185,8 +181,8 @@ class ChunkBreaker {
             reset() 
             return true
         } else {
-             // Interaction failed - retry with different block
-             cachedTargetBlock = null
+             // Interaction failed - invalidate and retry with different block immediately
+             invalidateCurrentTarget()
              AquamixDrawBot.LOGGER.warn("Interaction failed ($result), finding another target...")
              return false
         }
@@ -213,22 +209,33 @@ class ChunkBreaker {
         player.pitch = targetPitch
     }
 
+    // Blocks that failed placement (retry with another)
+    private val failedBlocks = mutableSetOf<BlockPos>()
+    
+    /**
+     * Invalidates current target and finds a new one immediately
+     */
+    fun invalidateCurrentTarget() {
+        cachedTargetBlock?.let { failedBlocks.add(it) }
+        cachedTargetBlock = null
+        targetRotationDone = false
+    }
+
     /**
      * Находит лучший твёрдый блок в СТРОГО УКАЗАННОМ чанке
+     * PURE DISTANCE SCORING - ближайший блок к игроку. Никаких штрафов.
      */
     private fun findBestTarget(client: MinecraftClient, chunk: ChunkPos): BlockPos? {
         val world = client.world ?: return null
         val player = client.player ?: return null
         
-        // Используем переданный чанк, а не игрока!
         val chunkX = chunk.x
         val chunkZ = chunk.z
         
         var bestBlock: BlockPos? = null
-        var bestScore = Double.MAX_VALUE
+        var bestDistSq = Double.MAX_VALUE
         
-        val centerX = (chunkX shl 4) + 8
-        val centerZ = (chunkZ shl 4) + 8
+        val playerPos = player.pos
         
         // Сканируем 16x16
         for (x in 0..15) {
@@ -236,55 +243,37 @@ class ChunkBreaker {
                 val worldX = (chunkX shl 4) + x
                 val worldZ = (chunkZ shl 4) + z
                 
-                // Полный скан высоты!
                 val startY = world.topY - 1 
                 
                 for (y in startY downTo world.bottomY) {
                     val pos = BlockPos(worldX, y, worldZ)
-                    
                     val state = world.getBlockState(pos)
                     
-                    // BUR can be placed on ANY block: slabs, stairs, solid, etc.
-                    // Only skip air and fluids
-                    if (!state.isAir && state.fluidState.isEmpty) {
-                        // Оценка:
-                        // 1. Расстояние от ИГРОКА (а не центра чанка), чтобы не лететь лишнего
-                        val dx = (worldX - player.x)
-                        val dz = (worldZ - player.z)
-                        val distToPlayer = sqrt(dx * dx + dz * dz)
-                        
-                        // 2. Чистота сверху
-                        val above = pos.up()
-                        val stateAbove = world.getBlockState(above)
-                        val isWater = stateAbove.fluidState.isStill && !stateAbove.block.name.string.contains("Lava")
-                        
-                        // Check if player is occupying the space (Collision Check)
-                        val candidateBox = net.minecraft.util.math.Box(
-                            above.x.toDouble(), above.y.toDouble(), above.z.toDouble(),
-                            above.x.toDouble() + 1.0, above.y.toDouble() + 1.0, above.z.toDouble() + 1.0
-                        )
-                        if (player.boundingBox.intersects(candidateBox)) {
-                             // Player is standing here! Invalid target.
-                             continue
-                        }
-                        
-                        val obstructionPenalty = if (!stateAbove.isAir && !isWater) 500.0 else 0.0
-                        
-                        // 3. Вертикальный штраф (предпочитаем блоки на нашей высоте или чуть ниже)
-                        // Если блок сильно ниже - штраф, чтобы не нырять глубоко без нужды
-                        // Если блок сильно выше - тоже штраф
-                        val dy = kotlin.math.abs(player.y - y)
-                        val vertPenalty = dy * 1.5
-                        
-                        val score = distToPlayer + obstructionPenalty + vertPenalty
-                        
-                        if (score < bestScore) {
-                            bestScore = score
-                            bestBlock = pos
-                        }
-                        
-                        break
+                    // Skip if already failed
+                    if (pos in failedBlocks) continue
+                    
+                    // Skip air
+                    if (state.isAir) continue
+                    
+                    // Skip fluids (water, lava)  
+                    if (!state.fluidState.isEmpty) continue
+                    
+                    // ALLOW ALL BLOCKS - leaves, glass, slabs, everything!
+                    // No collision shape check needed. If it's not air/fluid, it's valid.
+                    
+                    // VALID BLOCK FOUND! Calculate distance.
+                    val dx = worldX + 0.5 - playerPos.x
+                    val dy = y + 1.0 - playerPos.y
+                    val dz = worldZ + 0.5 - playerPos.z
+                    val distSq = dx * dx + dy * dy + dz * dz
+                    
+                    if (distSq < bestDistSq) {
+                        bestDistSq = distSq
+                        bestBlock = pos
                     }
+                    
+                    // Found surface at this X/Z, stop going down
+                    break 
                 }
             }
         }

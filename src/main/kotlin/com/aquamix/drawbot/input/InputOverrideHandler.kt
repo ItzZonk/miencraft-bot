@@ -51,6 +51,11 @@ object InputOverrideHandler {
         val player = client.player ?: return
         
         if (isInControl()) {
+            // Apply Attack/Use override
+            // We set the accepted key state directly to simulate hold
+            client.options.attackKey.setPressed(isInputForced(BotInput.ATTACK))
+            client.options.useKey.setPressed(isInputForced(BotInput.USE))
+
             // Бот активен - нужен BotMovementInput
             if (player.input !is BotMovementInput) {
                 // Сохраняем оригинальный Input
@@ -61,6 +66,16 @@ object InputOverrideHandler {
             }
         } else {
             // Бот НЕ активен - восстанавливаем оригинальный Input
+            // Also release keys if we were holding them
+            if (isInputForced(BotInput.ATTACK)) {
+                 client.options.attackKey.setPressed(false)
+                 setInputForced(BotInput.ATTACK, false)
+            }
+            if (isInputForced(BotInput.USE)) {
+                 client.options.useKey.setPressed(false)
+                 setInputForced(BotInput.USE, false)
+            }
+
             if (player.input is BotMovementInput) {
                 // Восстанавливаем сохранённый или создаём новый KeyboardInput
                 player.input = savedOriginalInput ?: KeyboardInput(client.options)

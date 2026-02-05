@@ -22,5 +22,9 @@ enum class BotInput {
     /** Left click (attack/break) */
     CLICK_LEFT,
     /** Right click (use/place) */
-    CLICK_RIGHT
+    CLICK_RIGHT,
+    /** Attack (Hold Left Click) */
+    ATTACK,
+    /** Use (Hold Right Click) */
+    USE
 }

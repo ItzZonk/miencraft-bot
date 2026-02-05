@@ -406,13 +406,20 @@ class ChunkMapScreen : Screen(Text.literal("Chunk Map")) {
         
         when (button) {
             0 -> {
+                val chunk = screenToChunk(mouseX, mouseY)
+                
+                // CTRL+Click = Toggle chunk completion manually
+                if (hasControlDown()) {
+                    AquamixDrawBot.botController.toggleChunkCompletion(chunk)
+                    return true
+                }
+                
                 if (hasShiftDown()) {
                     isSelecting = true
                     selectStartChunk = screenToChunk(mouseX, mouseY)
                 } else {
                     // Start Painting with Brush
                     isPainting = true
-                    val chunk = screenToChunk(mouseX, mouseY)
                     
                     // Determine mode: if clicking on selected -> remove mode. Else add mode.
                     paintAddMode = chunk !in selectedChunks

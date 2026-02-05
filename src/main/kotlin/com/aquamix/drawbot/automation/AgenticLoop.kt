@@ -143,6 +143,8 @@ object AgenticLoop {
      */
     private fun extractTarget(state: BotState): ChunkPos? = when (state) {
         is BotState.FlyingToChunk -> state.target
+        is BotState.FlyingToBlock -> state.targetChunk
+        is BotState.Landing -> state.target
         is BotState.Landing -> state.target
         is BotState.PlacingBur -> state.target
         is BotState.WaitingForMenu -> state.target
