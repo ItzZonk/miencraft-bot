@@ -123,7 +123,55 @@ object WorldRenderer : WorldRenderEvents.AfterTranslucent {
             renderRouteLine(matrices, routePoints)
         }
         
+        // === 6. "The Line In The Head" (A* Path Visualization) ===
+        // Render the exact path the bot is thinking about
+        val flightPath = controller.flightController.getCurrentPath()
+        if (flightPath != null && flightPath.isNotEmpty()) {
+            val pathPoints = flightPath.map { pos -> 
+                net.minecraft.util.math.Vec3d(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5) 
+            }
+            renderPathLine(matrices, pathPoints, 0.8f, 0.2f, 1.0f)
+        }
+        
         matrices.pop()
+    }
+    
+    // New method for Path Line (thinner, different style)
+    private fun renderPathLine(
+        matrices: MatrixStack,
+        points: List<net.minecraft.util.math.Vec3d>,
+        r: Float, g: Float, b: Float
+    ) {
+        if (points.size < 2) return
+        
+        val matrix = matrices.peek().positionMatrix
+        val tessellator = Tessellator.getInstance()
+        
+        RenderSystem.enableBlend()
+        RenderSystem.defaultBlendFunc()
+        RenderSystem.disableCull()
+        RenderSystem.setShader(GameRenderer::getPositionColorProgram)
+        RenderSystem.lineWidth(5.0f) // Thicker for "Mind Line"
+        
+        val buffer = tessellator.begin(VertexFormat.DrawMode.DEBUG_LINES, VertexFormats.POSITION_COLOR)
+        
+        for (i in 0 until points.size - 1) {
+            val p1 = points[i]
+            val p2 = points[i + 1]
+            
+            buffer.vertex(matrix, p1.x.toFloat(), p1.y.toFloat(), p1.z.toFloat())
+                .color(r, g, b, 0.9f)
+            buffer.vertex(matrix, p2.x.toFloat(), p2.y.toFloat(), p2.z.toFloat())
+                .color(r, g, b, 0.9f)
+        }
+        
+        val built = buffer.endNullable()
+        if (built != null) {
+            BufferRenderer.drawWithGlobalProgram(built)
+        }
+        
+        RenderSystem.enableCull()
+        RenderSystem.disableBlend()
     }
     
     /**

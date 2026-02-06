@@ -16,8 +16,8 @@ import net.minecraft.text.Text
  */
 class BotController {
     private val stateMachine = StateMachine()
-    private val chunkBreaker = ChunkBreaker()
-    private val flightController = FlightController()
+    val chunkBreaker = ChunkBreaker()
+    val flightController = FlightController()
     private val routeOptimizer = RouteOptimizer()
     val inventoryManager = InventoryManager()
     
@@ -163,21 +163,19 @@ class BotController {
                 // Активируем /fly
                 flightController.ensureFlyActive(client)
                 
-                // OPTIMIZATION: Check if we can see a target block NOW (chunk loaded while flying)
-                // If yes, switch to precise Block Flight immediately!
+                // ALWAYS try to find target block first (Zero Height Limit logic)
+                // If chunk is loaded, get target immediately
                 if (client.world != null && client.world!!.chunkManager.isChunkLoaded(state.target.x, state.target.z)) {
                     val targetBlock = chunkBreaker.getTarget(client, state.target)
                     if (targetBlock != null) {
-                         AquamixDrawBot.LOGGER.info("Mid-flight optimization: Found block ${targetBlock.toShortString()}, switching to direct flight!")
+                         AquamixDrawBot.LOGGER.info("Direct flight to block ${targetBlock.toShortString()}")
                          stateMachine.transition(BotState.FlyingToBlock(state.target, targetBlock))
                          return
                     }
                 }
                 
-                // Летим к чанку (fallback if no block found yet)
+                // Fallback: Fly to chunk center (only if chunk not loaded or no block found)
                 if (flightController.flyToChunk(client, state.target)) {
-                    AquamixDrawBot.LOGGER.debug("Arrived at chunk ${state.target}, finding target...")
-                    // Skip Landing - go straight to placing (which will find target)
                     stateMachine.transition(BotState.PlacingBur(state.target))
                 }
             }
@@ -229,8 +227,8 @@ class BotController {
                     stateMachine.transition(BotState.WaitingForMenu(state.target))
                 }
                 
-                // Таймаут 3 сек - сбрасываем кэш и ищем дальше
-                if (stateMachine.isTimedOut(3000)) {
+                // Таймаут 1 сек (быстро сдаёмся и пробуем снова)
+                if (stateMachine.isTimedOut(1000)) {
                     chunkBreaker.reset() // Clear cache and try again
                     
                     // Max 10 retries - if still no valid block, skip this chunk

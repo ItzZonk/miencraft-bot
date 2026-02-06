@@ -16,10 +16,16 @@ object InputOverrideHandler {
     
     private val forcedInputs = mutableMapOf<BotInput, Boolean>()
     
+    // SAFETY: Global Lock to prevent sneaking (Movement Fix)
+    var preventSneak: Boolean = false
+    
     // Сохраняем оригинальный Input для восстановления
     private var savedOriginalInput: Input? = null
     
-    fun isInputForced(input: BotInput): Boolean = forcedInputs[input] ?: false
+    fun isInputForced(input: BotInput): Boolean {
+        if (input == BotInput.SNEAK && preventSneak) return false
+        return forcedInputs[input] ?: false
+    }
     
     fun setInputForced(input: BotInput, forced: Boolean) {
         forcedInputs[input] = forced

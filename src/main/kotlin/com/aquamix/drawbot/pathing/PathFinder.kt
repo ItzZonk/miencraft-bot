@@ -2,9 +2,8 @@ package com.aquamix.drawbot.pathing
 
 import net.minecraft.util.math.BlockPos
 import net.minecraft.world.World
-import kotlin.math.abs
-import com.aquamix.drawbot.AquamixDrawBot
 import java.util.PriorityQueue
+import kotlin.math.sqrt
 
 /**
  * Node for A* pathfinding
@@ -24,26 +23,27 @@ data class PathNode(
 }
 
 /**
- * 3D Flight Pathfinding using A*
+ * Custom 3D Flight A* PathFinder
+ * "The Line in the Head"
  */
 class PathFinder(private val world: World) {
     
     /**
-     * Find path from start to target Y level (any X/Z at that height)
-     * Prioritizing staying close to centerX/centerZ
+     * Finds a flight path from start to end block
      */
-    fun findPathToHeight(
-        start: BlockPos, 
-        targetY: Int, 
-        centerX: Int, 
-        centerZ: Int,
-        maxNodes: Int = 1000
-    ): List<BlockPos>? {
+    fun findPath(start: BlockPos, end: BlockPos, maxNodes: Int = 5000): List<BlockPos>? {
+        if (!isPassable(end)) {
+            // Target is solid? Try to find adjacent air
+            // For now, assume target IS valid or we want to get adjacent
+        }
+        
         val openSet = PriorityQueue<PathNode>()
         val closedSet = mutableSetOf<BlockPos>()
+        val gScore = mutableMapOf<BlockPos, Double>()
         
-        val startNode = PathNode(start, null, 0.0, heuristic(start, targetY, centerX, centerZ))
+        val startNode = PathNode(start, null, 0.0, heuristic(start, end))
         openSet.add(startNode)
+        gScore[start] = 0.0
         
         var iterations = 0
         
@@ -52,14 +52,13 @@ class PathFinder(private val world: World) {
             
             val current = openSet.poll()
             
-            // Goal reached? (At target height)
-            if (current.pos.y >= targetY) {
+            if (current.pos == end || current.pos.getSquaredDistance(end) < 2.0) {
                 return reconstructPath(current)
             }
             
             closedSet.add(current.pos)
             
-            // Neighbors (3x3x3 area)
+            // Neighbors: 26 directions (3x3x3 cube)
             for (x in -1..1) {
                 for (y in -1..1) {
                     for (z in -1..1) {
@@ -69,23 +68,22 @@ class PathFinder(private val world: World) {
                         
                         if (closedSet.contains(neighborPos)) continue
                         
-                        // Check collision
                         if (!isPassable(neighborPos)) continue
                         
-                        // Cost calculation
-                        val moveCost = if (x != 0 && y != 0 && z != 0) 1.73 else if ((x != 0 && y != 0) || (x != 0 && z != 0) || (y != 0 && z != 0)) 1.41 else 1.0
-                        val newGCost = current.gCost + moveCost
+                        // Cost: 1.0 straight, 1.41 diagonal, 1.73 cubic diagonal
+                        val moveCost = sqrt((x*x + y*y + z*z).toDouble())
+                        val tentativeGCost = current.gCost + moveCost
                         
-                        val neighborNode = PathNode(
-                            neighborPos,
-                            current,
-                            newGCost,
-                            heuristic(neighborPos, targetY, centerX, centerZ)
-                        )
-                        
-                        // Check if better path exists (simplified: just add if not in open)
-                        // Optimization: For true A* we should check openSet, but for Minecraft local pathing often ok to skip
-                        openSet.add(neighborNode)
+                        if (tentativeGCost < (gScore[neighborPos] ?: Double.MAX_VALUE)) {
+                            gScore[neighborPos] = tentativeGCost
+                            val neighborNode = PathNode(
+                                neighborPos,
+                                current,
+                                tentativeGCost,
+                                heuristic(neighborPos, end)
+                            )
+                            openSet.add(neighborNode)
+                        }
                     }
                 }
             }
@@ -94,23 +92,43 @@ class PathFinder(private val world: World) {
         return null // No path found
     }
     
-    private fun heuristic(pos: BlockPos, targetY: Int, centerX: Int, centerZ: Int): Double {
-        val dy = (targetY - pos.y).toDouble()
-        val distToCenter = kotlin.math.sqrt(
-            ((pos.x - centerX).toDouble() * (pos.x - centerX)) + 
-            ((pos.z - centerZ).toDouble() * (pos.z - centerZ))
-        )
-        return dy + (distToCenter * 0.5) // Prefer moving up, but keep somewhat centered
+    private fun heuristic(a: BlockPos, b: BlockPos): Double {
+        // Euclidean distance for flight
+        return sqrt(a.getSquaredDistance(b))
     }
     
+    // Check if player fits here (0.6 x 1.8 x 0.6 box)
+    // Simplified: Check head and feet blocks
     private fun isPassable(pos: BlockPos): Boolean {
-        // Check 2 blocks for player height
-        val state1 = world.getBlockState(pos)
-        val state2 = world.getBlockState(pos.up())
+        // Helper to check if block is "solid obstacle"
+        // User Fix: Treat Grass/Flowers as passable (Air)
+        fun isObstacle(pos: BlockPos): Boolean {
+            val state = world.getBlockState(pos)
+            if (state.isAir) return false
+            if (!state.fluidState.isEmpty) return false // Water is fine
+            
+            // Check if replaceable (grass, flowers, kelp)
+            if (state.isReplaceable || 
+                state.block.name.string.contains("grass", ignoreCase = true) ||
+                state.block.name.string.contains("flower", ignoreCase = true) ||
+                state.block.name.string.contains("kelp", ignoreCase = true) ||
+                state.block.name.string.contains("fern", ignoreCase = true)
+               ) {
+                return false
+            }
+            
+            // Otherwise, check physical collision
+            if (state.isSolidBlock(world, pos)) return true
+            
+            // Explicitly avoid Leaves and Logs (Tree Avoidance)
+            val name = state.block.name.string.lowercase()
+            if (name.contains("leaves") || name.contains("log") || name.contains("planks")) {
+                return true
+            }
+            return false
+        }
         
-        // Simple check: Blocks must be air or passable fluids
-        // Need to be careful about "passable" (flowers/grass = ok, stone = no)
-        return (!state1.isSolidBlock(world, pos) && !state2.isSolidBlock(world, pos.up()))
+        return !isObstacle(pos) && !isObstacle(pos.up())
     }
     
     private fun reconstructPath(node: PathNode): List<BlockPos> {
@@ -120,6 +138,8 @@ class PathFinder(private val world: World) {
             path.add(current.pos)
             current = current.parent
         }
+        // Simplify path? (Raycast optimization)
+        // For now, raw path is fine for "Visual Line"
         return path.reversed()
     }
 }

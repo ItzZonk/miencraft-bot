@@ -57,10 +57,20 @@ class ProgressTracker {
      */
     fun save() {
         try {
-            Files.createDirectories(progressPath.parent)
-            progressPath.writeText(json.encodeToString(ProgressData.serializer(), data))
+            // Serialize on main thread to ensure consistency
+            val jsonString = json.encodeToString(ProgressData.serializer(), data)
+            
+            // Write to disk asynchronously (Fire & Forget)
+            java.util.concurrent.CompletableFuture.runAsync {
+                try {
+                    Files.createDirectories(progressPath.parent)
+                    progressPath.writeText(jsonString)
+                } catch (e: Exception) {
+                    AquamixDrawBot.LOGGER.error("Failed to save progress async: ${e.message}")
+                }
+            }
         } catch (e: Exception) {
-            AquamixDrawBot.LOGGER.error("Failed to save progress: ${e.message}")
+            AquamixDrawBot.LOGGER.error("Failed to serialize progress: ${e.message}")
         }
     }
     

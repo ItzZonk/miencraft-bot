@@ -11,6 +11,8 @@ import kotlin.math.sqrt
 import com.aquamix.drawbot.pathing.PathFinder
 import net.minecraft.util.math.BlockPos
 
+// Removed Baritone imports
+
 /**
  * Контроллер полёта - использует InputOverrideHandler для управления
  * Движение применяется через AquamixInput mixin
@@ -21,6 +23,11 @@ class FlightController {
     
     private var isFlying = false
     private var wasOnGround = true
+    
+    // Custom Pathfinding State
+    private var pathFinder: PathFinder? = null
+    private var currentPath: List<BlockPos>? = null
+    private var pathIndex = 0
     
     // Movement state detection
     enum class MovementState {
@@ -36,11 +43,6 @@ class FlightController {
     private var isFalling = false
     private var fallStartTime = 0L
     private var lastVelocityY = 0.0
-    
-    // Takeoff state machine (Gemini recommendation)
-    private var needsTakeoff = false
-    private var takeoffTickCounter = 0
-    private var takeoffStartTime = 0L
     
     // State for overshoot detection
     private var minDistanceToTarget = Double.MAX_VALUE
@@ -126,80 +128,98 @@ class FlightController {
         return false
     }
     
+    // Stuck Detection
+    private var lastPosTime = 0L
+    private var lastPos = net.minecraft.util.math.Vec3d.ZERO
+    private var stuckTicks = 0
+    
+    // Recovery
+    private var isRecovering = false
+    private var recoveryStartTime = 0L
+    
+    fun resetStuck() {
+        stuckTicks = 0
+        isRecovering = false
+    }
+
+    /**
+     * Checks if we are stuck and triggers recovery
+     */
+    fun checkStuck(client: MinecraftClient): Boolean {
+        val player = client.player ?: return false
+        
+        if (isRecovering) {
+            handleRecovery(client)
+            return true
+        }
+        
+        val pos = player.pos
+        val dist = pos.distanceTo(lastPos)
+        lastPos = pos
+        
+        // If we are trying to move but not moving
+        // (Threshold 0.05 is very small movement)
+        if (dist < 0.05 && currentState == MovementState.FLYING) {
+            stuckTicks++
+        } else {
+            stuckTicks = 0
+        }
+        
+        if (stuckTicks > 20) { // 1 second stuck
+            AquamixDrawBot.LOGGER.warn("Stuck detected! Initiating recovery...")
+            isRecovering = true
+            recoveryStartTime = System.currentTimeMillis()
+            stuckTicks = 0
+            return true
+        }
+        return false
+    }
+    
+    private fun handleRecovery(client: MinecraftClient) {
+        val player = client.player ?: return
+        val elapsed = System.currentTimeMillis() - recoveryStartTime
+        
+        if (elapsed > 1000) {
+            isRecovering = false
+            AquamixDrawBot.LOGGER.info("Recovery finished.")
+            return
+        }
+        
+        // WIGGLE: REMOVED (User Feedback: "Stop spinning")
+        // Just fly UP to clear the hole/tree
+        
+        // JUMP / UP
+        InputOverrideHandler.setInputForced(BotInput.JUMP, true)
+        
+        // Backward / Forward pulses to wiggle out of corner physics
+        if (elapsed < 500) {
+            InputOverrideHandler.setInputForced(BotInput.MOVE_BACK, true)
+            InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, false)
+        } else {
+            InputOverrideHandler.setInputForced(BotInput.MOVE_BACK, false)
+            InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true)
+        }
+    }
+
     fun ensureFlyActive(client: MinecraftClient) {
         val player = client.player ?: return
         
-        // Already flying? Done.
-        if (player.abilities.flying) {
-            isFlying = true
-            needsTakeoff = false
-            return
+        // ALWAYS FLY: No landing ever.
+        if (!player.abilities.flying && player.abilities.allowFlying) {
+             player.abilities.flying = true
+             player.sendAbilitiesUpdate()
         }
         
-        // Server mode: First, send /fly if we don't have allowFlying yet
-        if (!player.abilities.allowFlying && canSendFlyCommand()) {
-            sendFlyCommand(client)
-            // Start takeoff sequence after command is sent
-            needsTakeoff = true
-            takeoffTickCounter = 0
-            takeoffStartTime = System.currentTimeMillis()
-            return
+        // If we are falling and can't fly, try command
+        if (!player.abilities.flying) {
+             val now = System.currentTimeMillis()
+             if (now - lastFlyCommand > 2000) {
+                 client.networkHandler?.sendChatCommand("fly")
+                 lastFlyCommand = now
+             }
         }
-        
-        // If allowFlying but not flying -> Double-jump to activate flight!
-        // This is the standard Minecraft mechanism: 2x Space = fly mode ON
-        if (player.abilities.allowFlying && !player.abilities.flying) {
-            if (!needsTakeoff) {
-                needsTakeoff = true
-                takeoffTickCounter = 0
-                takeoffStartTime = System.currentTimeMillis()
-                AquamixDrawBot.LOGGER.info("Starting double-jump takeoff sequence...")
-            }
-        }
-        
-        // Double-jump state machine: Jump -> Release -> Jump -> Release
-        // Each tick is ~50ms, so we spread jumps across ticks
-        if (needsTakeoff) {
-            when (takeoffTickCounter) {
-                0, 1 -> {
-                    // First jump press (2 ticks)
-                    InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-                }
-                2, 3 -> {
-                    // Release (2 ticks)
-                    InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-                }
-                4, 5 -> {
-                    // Second jump press (2 ticks) - this should activate flying
-                    InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-                }
-                6 -> {
-                    // Done - check if flight activated
-                    InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-                    needsTakeoff = false
-                    if (player.abilities.flying) {
-                        isFlying = true
-                        AquamixDrawBot.LOGGER.info("Double-jump takeoff SUCCESS!")
-                    } else {
-                        AquamixDrawBot.LOGGER.warn("Double-jump takeoff failed, will retry...")
-                    }
-                }
-            }
-            takeoffTickCounter++
-            
-            // Timeout after 1.5 seconds - retry
-            if (System.currentTimeMillis() - takeoffStartTime > 1500) {
-                needsTakeoff = false
-                takeoffTickCounter = 0
-                AquamixDrawBot.LOGGER.warn("Takeoff timeout, resetting...")
-            }
-        }
-        
-        if (player.isOnGround && !wasOnGround && isFlying) {
-            if (!player.abilities.allowFlying) isFlying = false
-        }
-        wasOnGround = player.isOnGround
     }
+
     
     fun sendFlyCommand(client: MinecraftClient) {
         if (!canSendFlyCommand()) return
@@ -213,494 +233,285 @@ class FlightController {
     }
     
     /**
-     * Volume raycasting - проверяет проходимость пути с учётом хитбокса игрока (0.6x1.8x0.6)
-     * Рекомендация Gemini: использовать Box.stretch вместо одиночного луча
+     * FLY TO CHUNK - CUSTOM LOGIC
+     * 1. Calculate path to center of chunk at target height.
+     * 2. Store path.
+     * 3. Follow path.
      */
-    fun isPathClear(world: net.minecraft.world.World, start: net.minecraft.util.math.Vec3d, end: net.minecraft.util.math.Vec3d): Boolean {
-        // Player hitbox: 0.6 x 1.8 x 0.6
-        val box = net.minecraft.util.math.Box(
-            start.x - 0.3, start.y, start.z - 0.3,
-            start.x + 0.3, start.y + 1.8, start.z + 0.3
-        )
-        val movementVec = end.subtract(start)
-        val sweptBox = box.stretch(movementVec)
-        
-        // Check for any block collisions
-        return !world.getBlockCollisions(null, sweptBox).iterator().hasNext()
-    }
-    
     /**
-     * Проверяет есть ли твёрдый блок над игроком (потолок)
+     * FLY TO CHUNK - CUSTOM LOGIC
+     * 1. Calculate path to center of chunk at target height.
+     * 2. Store path.
+     * 3. Follow path.
      */
-    fun hasCeilingAbove(world: net.minecraft.world.World, player: net.minecraft.entity.player.PlayerEntity, height: Int = 3): Boolean {
-        val pos = player.blockPos
-        for (y in 1..height) {
-            val above = pos.up(y)
-            val state = world.getBlockState(above)
-            if (state.isSolidBlock(world, above)) {
-                return true
+    fun flyToChunk(client: MinecraftClient, chunk: ChunkPos): Boolean {
+        val player = client.player ?: return false
+        ensureFlyActive(client)
+        
+        // Target definition
+        val centerX = (chunk.x shl 4) + 8
+        val centerZ = (chunk.z shl 4) + 8
+        val configHeight = ModConfig.data.navigation.flightHeight
+        
+        // If we are already close to target chunk 2D, check completion
+        val distToCenter = sqrt((player.x - centerX) * (player.x - centerX) + (player.z - centerZ) * (player.z - centerZ))
+        // Optimization: Increase tolerance if moving fast? No, precision for chunk center.
+        if (distToCenter < 1.0) {
+             currentPath = null
+             stopMovement(client)
+             return true
+        }
+        
+        // Path handling
+        if (currentPath == null || pathIndex >= (currentPath?.size ?: 0)) {
+            // Need a new path
+            if (pathFinder == null) pathFinder = PathFinder(client.world!!)
+            
+            val targetY = if (player.y > (configHeight - 5)) player.blockY else configHeight
+            val targetPos = BlockPos(centerX, targetY, centerZ)
+            
+            AquamixDrawBot.LOGGER.info("Calculating new flight path to $targetPos...")
+            val rawPath = pathFinder?.findPath(player.blockPos, targetPos)
+            
+            // SMOOTHING: Optimize the path
+            currentPath = if (rawPath != null) smoothPath(client, rawPath) else null
+            pathIndex = 0
+            
+            if (currentPath == null) {
+                AquamixDrawBot.LOGGER.warn("Path finding failed! Using direct flight.")
+                // Fallback direct
+                return moveTowards(client, centerX.toDouble(), targetY.toDouble(), centerZ.toDouble())
             }
         }
+        
+        // Follow Path
+        val path = currentPath!!
+        
+        if (pathIndex < path.size) {
+            val nextNode = path[pathIndex]
+            val nodeX = nextNode.x + 0.5
+            val nodeY = nextNode.y + 0.5
+            val nodeZ = nextNode.z + 0.5
+            
+        // Check radius to current node
+        // OPTIMIZATION: If we can see the NEXT node, skip current immediately
+        if (pathIndex + 1 < path.size) {
+                val nextNext = path[pathIndex + 1]
+                val nX = nextNext.x + 0.5
+                val nY = nextNext.y + 0.5
+                val nZ = nextNext.z + 0.5
+                
+                // If we are close enough to current OR we can just fly to next directly
+                if (isLineOfSightClear(client, player.pos, net.minecraft.util.math.Vec3d(nX, nY, nZ))) {
+                    // Skip to next
+                    pathIndex++
+                    moveTowards(client, nX, nY, nZ) // Move to next immediately
+                    return false
+                }
+        }
+        
+        // CRITICAL: Dynamic Re-pathing (Tree Avoidance)
+        // Check if the path to the CURRENT node is clear. If a tree loaded in, we might be blocked.
+        // We check from eye height to avoid ground clutter, but for flight we check body center.
+        if (!isLineOfSightClear(client, player.pos, net.minecraft.util.math.Vec3d(nodeX, nodeY, nodeZ))) {
+             AquamixDrawBot.LOGGER.warn("Path blocked! Re-calculating...")
+             currentPath = null // Force re-path next tick
+             stopMovement(client)
+             return false
+        }
+        
+        val distToNode = player.squaredDistanceTo(nodeX, nodeY, nodeZ)
+        // Optimization: Larger acceptance radius for intermediate nodes (speed!)
+        val acceptanceRadiusSq = if (pathIndex < path.size - 1) 4.0 else 1.0 // 2.0 blocks for intermediate
+            
+            if (distToNode < acceptanceRadiusSq) {
+                pathIndex++
+                if (pathIndex >= path.size) {
+                    currentPath = null
+                    return false // Last step
+                }
+            }
+            
+            moveTowards(client, nodeX, nodeY, nodeZ)
+            return false
+        }
+        
         return false
     }
-
-    // Obstacle avoidance variables
-    private var lastPos: net.minecraft.util.math.Vec3d? = null
-    private var lastPosTime = 0L
-    private var stuckTimer = 0L
-    private var isStuck = false
-    private var avoidanceDirection = 0 // 0 = none, 1 = right, -1 = left
     
-    // Pathfinding state
-    private var currentPath: List<BlockPos>? = null
-    private var pathIndex = 0
-    private var pathUpdateTimer = 0L
-    
-    private fun checkStuck(player: net.minecraft.entity.player.PlayerEntity) {
-        val currentPos = player.pos
-        val now = System.currentTimeMillis()
-        
-        if (lastPos == null) {
-            lastPos = currentPos
-            lastPosTime = now
-            return
-        }
-        
-        // Check distance moved every 500ms
-        if (now - lastPosTime > 500) {
-            val dist = currentPos.distanceTo(lastPos)
-            if (dist < 0.5 && InputOverrideHandler.isInputForced(BotInput.MOVE_FORWARD)) {
-                if (!isStuck) {
-                    stuckTimer = now
-                    isStuck = true
-                    avoidanceDirection = if (Math.random() > 0.5) 1 else -1
-                    AquamixDrawBot.LOGGER.warn("[FlightController] Stuck detected! Initiating avoidance.")
-                }
-            } else {
-                isStuck = false
-            }
-            lastPos = currentPos
-            lastPosTime = now
-        }
-    }
-
     /**
-     * Двигаться к указанной точке с обходом препятствий
+     * Trajectory Pruning (Math Shoot)
+     * Reduces node count by connecting visible non-adjacent nodes.
+     */
+    private fun smoothPath(client: MinecraftClient, path: List<BlockPos>): List<BlockPos> {
+        if (path.size < 3) return path
+        
+        val smoothed = mutableListOf<BlockPos>()
+        smoothed.add(path[0])
+        
+        var currentIdx = 0
+        while (currentIdx < path.size - 1) {
+            var nextIdx = currentIdx + 1
+            
+            // Look ahead as far as possible
+            for (i in path.size - 1 downTo currentIdx + 2) {
+                val start = path[currentIdx]
+                val end = path[i]
+                
+                // Convert to Vec3d centers
+                val startVec = net.minecraft.util.math.Vec3d.ofCenter(start)
+                val endVec = net.minecraft.util.math.Vec3d.ofCenter(end)
+                
+                if (isLineOfSightClear(client, startVec, endVec)) {
+                    nextIdx = i
+                    break
+                }
+            }
+            
+            smoothed.add(path[nextIdx])
+            currentIdx = nextIdx
+        }
+        
+        return smoothed
+    }
+    
+    private fun isLineOfSightClear(client: MinecraftClient, start: net.minecraft.util.math.Vec3d, end: net.minecraft.util.math.Vec3d): Boolean {
+        val world = client.world ?: return false
+        // Raycast
+        // We use shape type COLLIDER to ignore grass/flowers but hit solids
+        val context = net.minecraft.world.RaycastContext(
+            start, 
+            end, 
+            net.minecraft.world.RaycastContext.ShapeType.COLLIDER, 
+            net.minecraft.world.RaycastContext.FluidHandling.NONE, 
+            client.player
+        )
+        val result = world.raycast(context)
+        return result.type == net.minecraft.util.hit.HitResult.Type.MISS
+    }
+    
+    // Expose path for Renderer
+    fun getCurrentPath(): List<BlockPos>? = currentPath
+    
+    /**
+     * Executes manual movement towards a specific coordinate.
+     * Core flight physics logic.
      */
     fun moveTowards(client: MinecraftClient, targetX: Double, targetY: Double, targetZ: Double, updateRotation: Boolean = true): Boolean {
         val player = client.player ?: return false
         
-        checkStuck(player)
-        
-        // Handle Obstacle Avoidance
-        if (isStuck || player.horizontalCollision) {
-            // Fly UP and Strafe
-            InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-            InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true)
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, true)
-            
-            if (avoidanceDirection == 1) {
-                InputOverrideHandler.setInputForced(BotInput.MOVE_RIGHT, true)
-                InputOverrideHandler.setInputForced(BotInput.MOVE_LEFT, false)
-            } else {
-                InputOverrideHandler.setInputForced(BotInput.MOVE_RIGHT, false)
-                InputOverrideHandler.setInputForced(BotInput.MOVE_LEFT, true)
-            }
-            
-            // Randomly change strafe direction if still stuck for long
-            if (System.currentTimeMillis() - stuckTimer > 2000) {
-                stuckTimer = System.currentTimeMillis() // Reset timer to switch direction
-                avoidanceDirection = -avoidanceDirection
-            }
-            
-            return false
-        }
-        
-        // Normal movement
         val dx = targetX - player.x
         val dy = targetY - player.y
         val dz = targetZ - player.z
+        val horizontalDistSq = dx * dx + dz * dz
+        val horizontalDist = sqrt(horizontalDistSq)
+        val totalDist = sqrt(horizontalDistSq + dy * dy)
         
-        val horizontalDist = sqrt(dx * dx + dz * dz)
-        val totalDist = sqrt(dx * dx + dy * dy + dz * dz)
+        val threshold = 0.5
         
-        val threshold = ModConfig.data.navigation.arrivalThreshold
-        
+        // Stuck Check
+        if (checkStuck(client)) return false // Recovering
+
         if (totalDist < threshold) {
             stopMovement(client)
             return true
         }
         
-        // Поворот к цели
-        if (updateRotation && horizontalDist > 0.1) {
+        // Rotation (Smoothed)
+        if (updateRotation && horizontalDist > 0.5) {
             val targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
-            val targetPitch = Math.toDegrees(atan2(-dy, horizontalDist)).toFloat()
-                .coerceIn(-60f, 60f)
+            val targetPitch = Math.toDegrees(atan2(-dy, horizontalDist)).toFloat().coerceIn(-90f, 90f)
             
-            player.yaw = lerpAngle(player.yaw, targetYaw, 0.15f)
-            player.pitch = lerpAngle(player.pitch, targetPitch, 0.1f)
+            // SMOOTH TURNS (Cinematic)
+            player.yaw = lerpAngle(player.yaw, targetYaw, 0.3f)
+            player.pitch = lerpAngle(player.pitch, targetPitch, 0.3f)
         }
         
-        // === Vertical Descent Logic (Fix for spinning high up) ===
-        // ONLY when flying - sneaking is fly-down key
-        if (dy < -3.0 && player.abilities.flying) { // We are significantly above target
-             if (horizontalDist <= 3.0) {
-                 // Aligned horizontally (within 3 blocks): DROP
-                 // Stop horizontal movement to prevent spiraling
-                 InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, horizontalDist > 0.5)
-                 InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
-                 player.isSprinting = false
-                 
-                 // Drop down (flying sneak = descend)
-                 InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
-                 InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-                 return false
-             }
-             // If dist > 3.0, allow diagonal descent (Standard PID below will handle SNEAK + FORWARD)
-        }
-
-        // Вертикальный спуск (fallback) - ONLY when flying
-        if (dy < -5.0 && horizontalDist < 2.0 && player.abilities.flying) {
-            InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, false)
-            InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
-            InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
-            return false
-        }
+        // Movement
+        // MOVEMENT LOGIC
+        // If dist > 0.5 (or configured speed), SPRINT.
+        // NEVER SNEAK if we are moving horiz > 0.1
+        val isMoving = totalDist > 0.1
+        val speedCheck = horizontalDist > threshold
         
-        // Управление через InputOverrideHandler
-        InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, horizontalDist > threshold)
+        // GLOBAL SAFETY LOCK: Prevent Sneak if moving horizontally
+        InputOverrideHandler.preventSneak = isMoving && horizontalDist > 0.5
         
-        // --- Adaptive Movement (Fly vs Walk/Run) ---
+        InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, isMoving && speedCheck)
+        InputOverrideHandler.setInputForced(BotInput.SPRINT, isMoving) // Always sprint if moving
+        // InputOverrideHandler.setInputForced(BotInput.SNEAK, false) // Handled by lock
+        player.isSprinting = isMoving
+        
+        // Vertical
         if (player.abilities.flying) {
-            // Flying: Force Sprint for speed
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, horizontalDist > 2.0)
-            player.isSprinting = horizontalDist > 2.0
-            
-            // Vertical control (Flying)
-            InputOverrideHandler.setInputForced(BotInput.JUMP, dy > 0.5)
-            InputOverrideHandler.setInputForced(BotInput.SNEAK, dy < -0.5)
-        } else {
-            // Walking/Running (Survival/Ground)
-            val isMoving = horizontalDist > threshold
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, isMoving && horizontalDist > 3.0)
-            player.isSprinting = isMoving && horizontalDist > 3.0
-            
-            // Auto-Jump (Bunny Hop) if moving fast and safely
-            // We jump if moving forward and not needing to go down
-            if (isMoving && horizontalDist > 4.0 && player.isOnGround && dy >= -1.0) {
-                 InputOverrideHandler.setInputForced(BotInput.JUMP, true)
+            if (dy > 0.5) {
+                InputOverrideHandler.setInputForced(BotInput.JUMP, true)
+                InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
+            } else if (dy < -0.5) {
+                // Fix: Only use SNEAK to descend if we are NOT moving fast horizontally.
+                // If moving fast, pitch (look down) handles descent. Crowding SNEAK kills speed.
+                val useSneakToDescend = horizontalDist < 2.0 
+                InputOverrideHandler.setInputForced(BotInput.SNEAK, useSneakToDescend)
+                InputOverrideHandler.setInputForced(BotInput.JUMP, false)
             } else {
-                 InputOverrideHandler.setInputForced(BotInput.JUMP, dy > 1.1) // Jump up blocks
+                InputOverrideHandler.setInputForced(BotInput.JUMP, false)
+                // Fine adjustments
+                if (dy < -0.1 && horizontalDist < 1.0) InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
+                else InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
             }
-            
-            // Descending logic for walking? (No sneak unless safe?)
-            InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
         }
-        
-        InputOverrideHandler.setInputForced(BotInput.MOVE_LEFT, false)
-        InputOverrideHandler.setInputForced(BotInput.MOVE_RIGHT, false)
-        
         return false
     }
-    
-    /**
-     * Безопасный подъём с проактивной проверкой препятствий
-     * - Raycast вперёд и вверх для обнаружения блоков
-     * - Отступает назад если застрял
-     * - Обходит препятствия по бокам
-     */
-    fun ascendSafely(client: MinecraftClient, targetHeight: Double) {
-        val player = client.player ?: return
-        val world = client.world ?: return
-        
-        // Check if stuck - if so, retry with VIOLENCE (Mining)
-        checkStuck(player)
-        if (isStuck) {
-            // New Logic: If obstructed, MINE through it
-            val lookVec = player.rotationVector
-            val blockAheadPos = player.blockPos.add(
-                (lookVec.x * 1.5).toInt(), 
-                0, 
-                (lookVec.z * 1.5).toInt()
-            )
-            val blockAheadState = world.getBlockState(blockAheadPos)
-            val blockHeadState = world.getBlockState(player.blockPos.up()) // Head level
-            
-            val isObstructed = !blockAheadState.isAir || !blockHeadState.isAir
-            
-            if (isObstructed) {
-                 AquamixDrawBot.LOGGER.warn("Stuck & Obstructed! Mining...")
-                 
-                 // Equip Pickaxe
-                 AquamixDrawBot.botController.inventoryManager.equipBestPickaxe(client)
-                 
-                 // Attack!
-                 InputOverrideHandler.setInputForced(BotInput.ATTACK, true)
-                 InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true)
-                 InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
-                 InputOverrideHandler.setInputForced(BotInput.JUMP, false) // Don't jump while mining
-                 
-                 // Reset stuck timer periodically to re-evaluate
-                 if (System.currentTimeMillis() - stuckTimer > 2000) {
-                     stuckTimer = System.currentTimeMillis()
-                 }
-                 return
-            } else {
-                 // Not obstructed but still stuck? Maybe clip/lag. Try Jump.
-                 InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-                 InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true)
-            }
-            
-            return
-        }
-        
-        // Proactive obstacle detection - raycast forward and up
-        val lookVec = player.rotationVector
-        val hasObstacleAhead = (1..3).any { dist ->
-            val checkPos = player.blockPos.add(
-                (lookVec.x * dist).toInt(),
-                1, // Check 1 block above
-                (lookVec.z * dist).toInt()
-            )
-            val state = world.getBlockState(checkPos)
-            !state.isAir && state.isSolidBlock(world, checkPos)
-        }
-        
-        // Check collision/stuck
-        if (isStuck || hasObstacleAhead) {
-            // Check if we need a new path
-            val now = System.currentTimeMillis()
-            if (currentPath == null || now - pathUpdateTimer > 2000) {
-                 AquamixDrawBot.LOGGER.info("Ascent obstructed! Calculating path...")
-                 val pathFinder = PathFinder(world)
-                 
-                 // Target center of chunk
-                 val chunkX = (player.blockPos.x shr 4) shl 4 + 8
-                 val chunkZ = (player.blockPos.z shr 4) shl 4 + 8
-                 
-                 currentPath = pathFinder.findPathToHeight(
-                     player.blockPos, 
-                     targetHeight.toInt(),
-                     chunkX,
-                     chunkZ
-                 )
-                 pathIndex = 0
-                 pathUpdateTimer = now
-            }
-        }
-        
-        // If we have a path, follow it
-        if (currentPath != null && pathIndex < currentPath!!.size) {
-            val targetNode = currentPath!![pathIndex]
-            val dist = player.pos.distanceTo(net.minecraft.util.math.Vec3d.ofBottomCenter(targetNode))
-            
-            if (dist < 1.0) {
-                pathIndex++
-                if (pathIndex >= currentPath!!.size) {
-                    currentPath = null // Done
-                    return
-                }
-            }
-            
-            // Move to next node
-            val nextPos = currentPath!![pathIndex]
-            moveTowards(client, nextPos.x + 0.5, nextPos.y + 0.1, nextPos.z + 0.5, true)
-            
-            // Force jump if going up
-            if (nextPos.y > player.y) {
-                 InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-            }
-            return
-        }
 
-        // Fallback to simple proactive avoidance logic if no path found
-        if (hasObstacleAhead) {
-            // Obstacle detected ahead - fly up and strafe
-            InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-            InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true)
-            if (avoidanceDirection == 1) {
-                InputOverrideHandler.setInputForced(BotInput.MOVE_RIGHT, true)
-                InputOverrideHandler.setInputForced(BotInput.MOVE_LEFT, false)
-            } else {
-                InputOverrideHandler.setInputForced(BotInput.MOVE_RIGHT, false)
-                InputOverrideHandler.setInputForced(BotInput.MOVE_LEFT, true)
-            }
-        } else {
-            // Clear path so far - just ascend
-            InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-            InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, false)
-            InputOverrideHandler.setInputForced(BotInput.MOVE_BACK, false)
-            InputOverrideHandler.setInputForced(BotInput.MOVE_LEFT, false)
-            InputOverrideHandler.setInputForced(BotInput.MOVE_RIGHT, false)
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
-            
-            // Align to center slowly
-            val chunkX = ((player.blockPos.x shr 4) shl 4) + 8.0
-            val chunkZ = ((player.blockPos.z shr 4) shl 4) + 8.0
-             
-            val distToCenter = sqrt(
-                (player.x - chunkX) * (player.x - chunkX) +
-                (player.z - chunkZ) * (player.z - chunkZ)
-            )
-            
-            // Gentle nudge to center if far away
-            if (distToCenter > 4.0) {
-                 moveTowards(client, chunkX, player.y + 1, chunkZ, true)
-            }
-        }
-    }
-    
-    fun flyToChunk(client: MinecraftClient, chunk: ChunkPos): Boolean {
-        val player = client.player ?: return false
-        
-        // Reset state if target changed
-        if (lastTargetChunk != chunk) {
-            minDistanceToTarget = Double.MAX_VALUE
-            lastTargetChunk = chunk
-        }
-        
-        // Target CENTER of chunk (x*16 + 8)
-        val targetX = (chunk.x shl 4) + 8.0
-        val targetZ = (chunk.z shl 4) + 8.0
-        
-        val dx = targetX - player.x
-        val dz = targetZ - player.z
-        val horizontalDist = sqrt(dx * dx + dz * dz)
-        
-        // --- Smart Arrival Logic ---
-        
-        // 1. Update minimum distance seen
-        if (horizontalDist < minDistanceToTarget) {
-            minDistanceToTarget = horizontalDist
-        }
-        
-        val threshold = ModConfig.data.navigation.arrivalThreshold.coerceAtLeast(1.0)
-        
-        // 2. Check direct arrival
-        if (horizontalDist < threshold) {
-            stopMovement(client)
-            return true
-        }
-        
-        // 3. Overshoot detection:
-        // If we were very close (< threshold + 3.0 blocks) 
-        // AND now we are moving AWAY (current > min + 0.5)
-        // THEN we probably just flew past the center. Stop and accept it.
-        if (minDistanceToTarget < threshold + 3.0 && horizontalDist > minDistanceToTarget + 0.5) {
-            if (System.currentTimeMillis() % 1000 < 50) {
-                AquamixDrawBot.LOGGER.info("Overshoot detected! Forcing arrival at dist $horizontalDist (min was $minDistanceToTarget)")
-            }
-            stopMovement(client)
-            return true
-        }
-        
-        // Use config height, but don't force ascent if already flying at reasonable height
-        // Use config height ONLY if we are too low
-        // Otherwise maintain current altitude to prevent annoying ascents (Baritone-style)
-        val configHeight = ModConfig.data.navigation.flightHeight.toDouble()
-        val currentY = player.y
-        
-        // Target Y: If we are high enough (>70), stay there. If low, go to config height.
-        // This prevents flying up after every chunk.
-        val targetFlyHeight = if (currentY < 70.0) configHeight else currentY
-        val minFlightHeight = targetFlyHeight - 5.0
-        
-        // 4. Ascent and Movement
-        // ONLY ascend if we are dangerously low or path is obstructed
-        // Don't just fly up because "config says so" if we can fly diagonal
-        val dangerouslyLow = player.y < 70.0 // Assume void/danger is low
-        
-        // Check if direct path to target height is clear
-        val targetPos = net.minecraft.util.math.Vec3d(targetX, targetFlyHeight, targetZ)
-        val pathClear = isPathClear(client.world!!, player.pos, targetPos)
-        
-        if (dangerouslyLow || !pathClear) {
-             val needsAscent = player.y < minFlightHeight && !player.abilities.flying
-             if (needsAscent) {
-                 // REMOVED: ascendSafely(client, configHeight)
-                 return false
-             }
-        }
-        
-        // If path IS clear, we just fly towards target (FlyController.moveTowards handles the rest)
-        
-        ensureFlyActive(client)
-        
-        // Slow down near target (within 15 blocks)
-        if (horizontalDist < 15.0) {
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
-            player.isSprinting = false
-        } else {
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, true)
-            player.isSprinting = true
-        }
-        
-        InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-        InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
-        
-        return moveTowards(client, targetX, targetFlyHeight, targetZ)
-    }
-    
     fun flyToBlock(client: MinecraftClient, targetBlock: BlockPos): Boolean {
         val player = client.player ?: return false
-
-        // Target: 2 blocks above the block (Hover position)
+        ensureFlyActive(client)
+        
         val targetX = targetBlock.x + 0.5
-        val targetY = targetBlock.y + 2.0
+        val targetY = targetBlock.y + 2.0 // Hover
         val targetZ = targetBlock.z + 0.5
         
-        val dx = targetX - player.x
-        val dy = targetY - player.y
-        val dz = targetZ - player.z
-        val horizontalDist = sqrt(dx * dx + dz * dz)
-        val totalDist = sqrt(dx * dx + dy * dy + dz * dz)
+        if (currentPath == null || pathIndex >= (currentPath?.size ?: 0)) {
+            if (pathFinder == null) pathFinder = PathFinder(client.world!!)
+            
+            // Path to Hover pos
+            val targetPos = BlockPos(targetBlock.x, targetBlock.y + 2, targetBlock.z)
+            // If already close, skip pathing
+            if (player.squaredDistanceTo(targetX, targetY, targetZ) < 100.0) {
+                 // Close enough for direct approach? May need path if obstructed.
+                 // Let's use pathfinder if distance > 5
+                 if (player.squaredDistanceTo(targetX, targetY, targetZ) > 25.0) {
+                      currentPath = pathFinder?.findPath(player.blockPos, targetPos)
+                      pathIndex = 0
+                 }
+            }
+        }
         
-        // 1. Arrival check
-        if (totalDist < 1.0) {
+        if (currentPath != null) {
+            // Follow path logic
+            val path = currentPath!!
+             if (pathIndex < path.size) {
+                val nextNode = path[pathIndex]
+                val nodeX = nextNode.x + 0.5
+                val nodeY = nextNode.y + 0.5
+                val nodeZ = nextNode.z + 0.5
+                
+                if (player.squaredDistanceTo(nodeX, nodeY, nodeZ) < 2.0) {
+                    pathIndex++
+                }
+                moveTowards(client, nodeX, nodeY, nodeZ)
+                return false
+            }
+        }
+        
+        // Direct approach (Final stretch)
+        val dist = sqrt((player.x - targetX)*(player.x - targetX) + (player.y - targetY)*(player.y - targetY) + (player.z - targetZ)*(player.z - targetZ))
+        if (dist < 1.0) {
             stopMovement(client)
             return true
         }
-
-        ensureFlyActive(client)
-
-        // 2. Direct flight (ignore safe height unless obstructed)
-        // Check obstruction only if we are moving significantly
-        if (totalDist > 5.0) {
-             val pathClear = isPathClear(client.world!!, player.pos, net.minecraft.util.math.Vec3d(targetX, targetY, targetZ))
-             if (!pathClear) {
-                 // Path blocked! Use safe ascent logic
-                 // Use max(currentY, targetY + 5) as safe height
-                 val safeHeight = kotlin.math.max(player.y, targetY) + 10.0
-                 // REMOVED: ascendSafely(client, safeHeight)
-                 return false
-             }
-        }
         
-        // Speed control
-        if (totalDist < 5.0) {
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
-            player.isSprinting = false
-        } else {
-            InputOverrideHandler.setInputForced(BotInput.SPRINT, true)
-            player.isSprinting = true
-        }
-        
-        // Direct move
-        moveTowards(client, targetX, targetY, targetZ, true)
-        
-        // Vertical corrections
-        if (dy > 0.5) {
-             InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-             InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
-        } else if (dy < -0.5) {
-             InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
-             InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-        } else {
-             InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-             InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
-        }
-        
+        moveTowards(client, targetX, targetY, targetZ)
         return false
     }
 
@@ -737,34 +548,16 @@ class FlightController {
         val hoverHeight = if (isWaterAboveGround) 3.0 else 1.5
         val targetY = groundY.toDouble() + hoverHeight
         
-        val dy = player.y - targetY
+        // Check arrival
         val horizontalDist = sqrt((player.x - targetX) * (player.x - targetX) + (player.z - targetZ) * (player.z - targetZ))
+        val dy = player.y - targetY
         
-        // Arrived condition: close to target position (for both water and land)
         if (horizontalDist < 2.0 && kotlin.math.abs(dy) < 2.0) {
-            // For water: we're in position, consider landed
-            // For land: check if actually on ground
-            if (isWaterAboveGround || player.isOnGround || dy < 1.0) {
-                stopMovement(client)
-                return true
-            }
+            stopMovement(client)
+            return true
         }
         
-        // Move to position
-        if (dy > 1.0) {
-            // Descend
-            InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
-            InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-        } else if (dy < -1.0) {
-            // Ascend (we're too low)
-            InputOverrideHandler.setInputForced(BotInput.JUMP, true)
-            InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
-        } else {
-            // At right height
-            InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-            InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
-        }
-        
+        // Use manual move
         return moveTowards(client, targetX, targetY, targetZ)
     }
     
@@ -781,18 +574,30 @@ class FlightController {
     }
 
     fun hoverAbove(client: MinecraftClient, target: net.minecraft.util.math.BlockPos, updateRotation: Boolean = false) {
-        val targetX = target.x + 0.5
-        val targetY = target.y + 2.5 // Hover 2.5 blocks above
-        val targetZ = target.z + 0.5
+        val player = client.player ?: return
         
-        moveTowards(client, targetX, targetY, targetZ, updateRotation)
+        // Target Y logic detailed above...
+        val currentY = player.y
+        val relY = currentY - target.y
+        
+        val targetY = when {
+            relY < 1.5 -> target.y + 3.0 // Go up
+            relY > 6.0 -> target.y + 4.0 // Come down
+            else -> currentY
+        }
+        
+        moveTowards(client, target.x + 0.5, targetY, target.z + 0.5, updateRotation)
+    }
+
+    fun ascendSafely(client: MinecraftClient, targetHeight: Double) {
+        val player = client.player ?: return
+        moveTowards(client, player.x, targetHeight, player.z)
     }
 
     fun reset() {
         isFlying = false
         wasOnGround = true
-        lastPos = null
-        isStuck = false
         InputOverrideHandler.clearAll()
+        currentPath = null
     }
 }

@@ -1,65 +1,46 @@
-# Aquamix Draw Bot
+# Aquamix Draw Bot 🤖
 
-Fabric мод для Minecraft 1.21.1, автоматизирующий создание пиксель-арта через удаление чанков на сервере mc.aqua-mix.com.
+## Overview
+**Aquamix Draw Bot** is a specialized Minecraft fabric mod designed to automate large-scale chunk clearing and building operations on the Aquamix server. It operates by autonomously flying to specific chunks and placing a special tool—the **BUR** (End Portal Frame)—which triggers server-side world editing/clearing events.
 
-## Возможности
+## Core Mechanics
 
-- 🗺️ **Интерактивная карта чанков** - выбор чанков для удаления мышкой
-- ✈️ **Автоматический полёт** - использует /fly и элитры для перемещения
-- 🔨 **Автоматизация БУРа** - установка и взаимодействие с меню
-- 📊 **Оптимизация маршрута** - TSP алгоритм для минимизации времени
-- 💾 **Схематики** - сохранение и загрузка паттернов
-- 📈 **Прогресс** - сохранение между сессиями
+### 1. The "BUR" (Block Update Request) 🔮
+- **Item**: End Portal Frame (`minecraft:end_portal_frame`).
+- **Function**: On this specific server, placing a BUR on a block triggers a chunk-clearing or building operation.
+- **Bot Behavior**: The bot scans the target chunk for a valid solid block (closest to the top but within range), checks for obstacles, and places the BUR. If the placement fails or is obstructed, it attempts to clear obstacles (grass/kelp) or find a neighbor block.
 
-## Установка
+### 2. Flight & Movement ✈️
+The bot uses a **custom flight controller** (`FlightController.kt`) that simulates player input to achieve 3D movement.
+- **Input Override**: It hijacks standard player inputs (`InputOverrideHandler.kt`) using a Baritone-like approach, sending `W, A, S, D, JUMP, SNEAK` packets to the client.
+- **Fail-Safe Gliding**: It constantly ensures `abilities.flying` is true. If the bot falls, it detects the descent and recovers by flying up.
+- **Anti-Spin**: If stuck, it ascends vertically rather than rotating blindly.
+- **Cinematic Turns**: Rotation (`yaw`/`pitch`) is smoothed (Lerped) to look natural and avoid anti-cheat triggers.
 
-1. Установи [Fabric Loader](https://fabricmc.net/) для Minecraft 1.21.1
-2. Скачай [Fabric API](https://modrinth.com/mod/fabric-api)
-3. Скачай [Fabric Language Kotlin](https://modrinth.com/mod/fabric-language-kotlin)
-4. Скопируй `aquamix-draw-bot-1.0.0.jar` в папку `mods`
+### 3. Pathfinding & Navigation 🧭
+- **A* Algorithm**: `PathFinder.kt` implements a 3D A* search to find paths between chunks.
+- **Obstacle Avoidance**: It treats `Leaves`, `Logs`, and `Planks` as **SOLID OBSTACLES** to avoid getting stuck in trees during low-altitude flight.
+- **Dynamic Re-Pathing**: Before every movement segment, it Raycasts ahead. If a tree or wall suddenly appears (chunk load), it invalidates the current path and recalculates instantly.
 
-## Использование
+### 4. 3D Scanning 📡
+- **Target Selection**: `ChunkBreaker.kt` scans the target chunk to find the optimal placement spot for the BUR.
+- **Fail-Fast**: If a placement attempt fails (e.g., server lag, invisible wall), it retries up to 5 alternative spots **in the same tick** to ensure maximum efficiency.
 
-### Горячие клавиши
+## Architecture
 
-| Клавиша | Действие |
-|---------|----------|
-| **M** | Открыть карту чанков |
-| **B** | Запустить/остановить бота |
+- **`BotController.kt`**: Main brain. Manages the state machine (Flying -> Breaker -> Next Chunk).
+- **`FlightController.kt`**: Low-level movement logic. Handles physics, rotation, and path following.
+- **`ChunkBreaker.kt`**: Interaction logic. Scans blocks, handles tools (Pickaxe vs Hand), clears grass, and places BURs.
+- **`InputOverrideHandler.kt`**: Middleware that forces input states into the Minecraft client.
+- **`PathFinder.kt`**: Utility for calculating 3D paths.
 
-### Карта чанков
+## Key Features for Review
 
-- **ЛКМ** - выбрать/убрать чанк
-- **Shift+ЛКМ** - выделение прямоугольником
-- **ПКМ** - перетаскивание карты
-- **Колёсико** - масштабирование
-- **СКМ** - центрирование на клике
+- **Global Sneak Lock**: To prevent the bot from moving slowly, `SNEAK` is forcefully disabled in the input handler whenever the bot is sprinting horizontally.
+- **Fluid Handling**: The bot treats water as valid terrain for movement but ensures it hovers *above* it when placing blocks.
+- **Grass Passability**: Grass and Flowers are treated as "Air" by the pathfinder (Cost 0), allowing the bot to fly through fields without detouring, breaking them if they block placement.
 
-### Цвета чанков
-
-- 🔴 **Красный** - выбран для удаления
-- 🟠 **Оранжевый** - в очереди бота
-- 🟢 **Зелёный** - уже удалён
-- 🔵 **Синий** - текущая цель бота
-
-## Требования
-
-- БУР (End Portal Frame с чарами) в хотбаре
-- Элитры на персонаже
-- Доступ к команде /fly на сервере
-
-## Сборка
-
-```bash
-./gradlew build
-```
-
-JAR файл будет в `build/libs/`
-
-## Конфигурация
-
-Настройки хранятся в `config/aquamix-draw-bot.json`
-
-## Лицензия
-
-MIT License
+## Building & Running
+1. Clone the repo.
+2. Run `./gradlew build`.
+3. The jar will be in `build/libs/`.
