@@ -23,7 +23,7 @@ The bot is designed to fly autonomously through a Minecraft world and place "BUR
 
 # Repository Access
 The full source code is available here:
-- **GitHub Repo**: [View Code](<YOUR_GITHUB_REPO_URL>)
+- **GitHub Repo**: [View Code](https://github.com/ItzZonk/miencraft-bot)
 - **Source Tree**: `src/main/kotlin/com/aquamix/drawbot/`
 
 Please refer to the repository for the complete context of imports and helper classes.
