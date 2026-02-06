@@ -310,14 +310,19 @@ class FlightController {
                 }
         }
         
-        // CRITICAL: Dynamic Re-pathing (Tree Avoidance)
-        // Check if the path to the CURRENT node is clear. If a tree loaded in, we might be blocked.
-        // We check from eye height to avoid ground clutter, but for flight we check body center.
-        if (!isLineOfSightClear(client, player.pos, net.minecraft.util.math.Vec3d(nodeX, nodeY, nodeZ))) {
-             AquamixDrawBot.LOGGER.warn("Path blocked! Re-calculating...")
+        // CRITICAL: Predictive Re-pathing (Kimi Fix 1)
+        val pathSafety = validatePathAhead(client, path, pathIndex)
+        if (pathSafety < 0.5f) {
+             AquamixDrawBot.LOGGER.warn("Path ahead unsafe (score: $pathSafety)! Re-calculating...")
              currentPath = null // Force re-path next tick
              stopMovement(client)
              return false
+        } else if (pathSafety < 1.0f) {
+            // Slow down if uncertain
+             InputOverrideHandler.setInputForced(BotInput.SPRINT, false)
+        } else {
+             // Safe to sprint
+             InputOverrideHandler.setInputForced(BotInput.SPRINT, true)
         }
         
         val distToNode = player.squaredDistanceTo(nodeX, nodeY, nodeZ)
@@ -375,10 +380,69 @@ class FlightController {
         return smoothed
     }
     
+    /**
+     * Predictive Look-Ahead: Validates path ahead by checking multiple upcoming nodes.
+     * Returns: Safety score (0.0 = blocked, 1.0 = clear)
+     */
+    private fun validatePathAhead(client: MinecraftClient, path: List<BlockPos>, currentIndex: Int): Float {
+        if (currentIndex >= path.size - 1) return 1.0f
+        
+        val player = client.player ?: return 0.0f
+        val lookAheadCount = kotlin.math.min(3, path.size - currentIndex - 1) // Check next 3 nodes
+        var clearNodes = 0
+        
+        // 1. Check immediate next node (Line of Sight)
+        // We use eye pos for this first check
+        val nextNode = path[currentIndex]
+        val nextVec = net.minecraft.util.math.Vec3d.ofCenter(nextNode)
+        if (!isLineOfSightClear(client, player.eyePos, nextVec)) return 0.0f
+        
+        // 2. Check subsequent nodes with Width Clearance
+        for (i in 1..lookAheadCount) {
+            val futureNode = path[currentIndex + i]
+            val futureVec = net.minecraft.util.math.Vec3d.ofCenter(futureNode)
+            
+            // Wider raycast for future nodes (accounting for drift/width)
+            // 0.6 is slightly larger than player width (0.6) for safety
+            val clearance = checkClearance(client, futureVec, 0.4) 
+            if (clearance < 0.5) break // Path blocked or unsafe
+            
+            clearNodes++
+        }
+        
+        return clearNodes.toFloat() / lookAheadCount.coerceAtLeast(1)
+    }
+    
+    /**
+     * Enhanced clearance check that accounts for player width (Kimi Fix 2)
+     */
+    private fun checkClearance(client: MinecraftClient, center: net.minecraft.util.math.Vec3d, radius: Double): Float {
+        val world = client.world ?: return 0.0f
+        val offsets = listOf(
+            net.minecraft.util.math.Vec3d(radius, 0.0, 0.0), 
+            net.minecraft.util.math.Vec3d(-radius, 0.0, 0.0),
+            net.minecraft.util.math.Vec3d(0.0, 0.0, radius), 
+            net.minecraft.util.math.Vec3d(0.0, 0.0, -radius),
+            net.minecraft.util.math.Vec3d(0.0, 1.0, 0.0), // Head/Body center
+            net.minecraft.util.math.Vec3d(0.0, -1.0, 0.0) // Feet
+        )
+        
+        var blocked = 0
+        for (offset in offsets) {
+            val checkPos = center.add(offset)
+            val blockPos = net.minecraft.util.math.BlockPos(checkPos.x.toInt(), checkPos.y.toInt(), checkPos.z.toInt())
+            val state = world.getBlockState(blockPos)
+            
+            if (state.isSolidBlock(world, blockPos) || state.block.name.string.lowercase().contains("leaves")) {
+                blocked++
+            }
+        }
+        
+        return 1.0f - (blocked.toFloat() / offsets.size)
+    }
+
     private fun isLineOfSightClear(client: MinecraftClient, start: net.minecraft.util.math.Vec3d, end: net.minecraft.util.math.Vec3d): Boolean {
         val world = client.world ?: return false
-        // Raycast
-        // We use shape type COLLIDER to ignore grass/flowers but hit solids
         val context = net.minecraft.world.RaycastContext(
             start, 
             end, 
@@ -387,6 +451,12 @@ class FlightController {
             client.player
         )
         val result = world.raycast(context)
+        // Also check if result block is leaves/log?
+        if (result.type == net.minecraft.util.hit.HitResult.Type.BLOCK) {
+            val state = world.getBlockState(result.blockPos)
+            val name = state.block.name.string.lowercase()
+            if (name.contains("leaves") || name.contains("log")) return false
+        }
         return result.type == net.minecraft.util.hit.HitResult.Type.MISS
     }
     

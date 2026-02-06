@@ -42,7 +42,17 @@ class ChunkBreaker {
         scanAttempts = 0
         failedBlocks.clear()
         stopBreaking()
+        currentState = PlacementState.IDLE
     }
+    
+    // === State Machine (Kimi Fix) ===
+    enum class PlacementState {
+        IDLE, BREAKING_OBSTACLE, PLACING, WAITING_CONFIRMATION
+    }
+
+    private var currentState = PlacementState.IDLE
+    private var stateStartTime = 0L
+    private var currentTarget: BlockPos? = null
     
     // === Digging Logic ===
     
@@ -94,79 +104,81 @@ class ChunkBreaker {
      */
     fun placeBur(client: MinecraftClient, targetChunk: ChunkPos): Boolean {
         val player = client.player ?: return false
-        val interactionManager = client.interactionManager ?: return false
         val world = client.world ?: return false
+        val interactionManager = client.interactionManager ?: return false
         
         if (!canAct()) return false
         
-        // 1. Найти цель
-        val targetBlock = getTarget(client, targetChunk)
-        if (targetBlock == null) {
-            if (scanAttempts % 50 == 0) {
-                 AquamixDrawBot.LOGGER.info("Scanning chunk $targetChunk exhaustively (attempt $scanAttempts)...")
-            }
-            return false 
-        }
-        
-        // Fail-Fast: Try multiple times per tick until success
-        var attempts = 0
-        var currentTarget: BlockPos? = targetBlock
-        
-        while (attempts < 5 && currentTarget != null) { // Try up to 5 candidates instantly
-             attempts++
-             val target = currentTarget!!
-             
-             // 2. Obstacle Clearing
-             val blockAbove = target.up()
-             val stateAbove = world.getBlockState(blockAbove)
-             
-             // If already placed?
-             if (stateAbove.block == net.minecraft.block.Blocks.END_PORTAL_FRAME) {
-                 // Already here
-                 // ... interaction logic ...
-                 val hitResult = BlockHitResult(Vec3d.ofCenter(blockAbove), Direction.UP, blockAbove, false)
-                 lookAt(player, blockAbove)
-                 interactionManager.interactBlock(player, Hand.MAIN_HAND, hitResult)
-                 player.swingHand(Hand.MAIN_HAND)
-                 markAction()
-                 return true 
-             }
-             
-             // Break grass/kelp instantly
-             val isReplaceable = stateAbove.isReplaceable || stateAbove.block.name.string.contains("grass", ignoreCase = true)
-             if (!stateAbove.isAir && (!isReplaceable || stateAbove.block.name.string.contains("Kelp", ignoreCase = true))) {
-                  AquamixDrawBot.botController.inventoryManager.equipBestPickaxe(client)
-                  val broken = updateBreaking(client, blockAbove)
-                  if (!broken) {
-                      markAction()
-                      return false // Must wait for break
-                  }
-             } else {
-                 stopBreaking()
-             }
-             
-             // Equip BUR if needed (only once per tick optimization)
-             val inventory = player.inventory
-             var burSlot = -1
-             for (i in 0..8) {
-                if (inventory.getStack(i).item == Items.END_PORTAL_FRAME) {
-                    burSlot = i
-                    break
+        // State Machine Logic
+        when (currentState) {
+            PlacementState.IDLE -> {
+                // 1. Find Target
+                currentTarget = getTarget(client, targetChunk)
+                if (currentTarget == null) {
+                     if (scanAttempts % 50 == 0) AquamixDrawBot.LOGGER.info("Scanning chunk $targetChunk...")
+                     return false
                 }
-             }
-             if (burSlot == -1) return false
-             if (inventory.selectedSlot != burSlot) inventory.selectedSlot = burSlot
-             
-             // Safety
-             val burPos = target.up()
-             if (player.boundingBox.intersects(net.minecraft.util.math.Box(burPos))) {
-                 invalidateCurrentTarget() // Current target bad
-                 // Try to get next target immediately?
-                 // We need to fetch next best from `findBestTarget` excluding failed.
-                 // But `findBestTarget` is expensive.
-                 // Better: Use `tryPlaceAgainstNeighbors` on this bad pos.
-             } else {
-                 // Try Placement
+                
+                // 2. Decide Action
+                val blockAbove = currentTarget!!.up()
+                val stateAbove = world.getBlockState(blockAbove)
+                
+                // Check if needs breaking
+                // Logic: Not air, AND (not replaceable OR is Kelp)
+                val isReplaceable = stateAbove.isReplaceable || stateAbove.block.name.string.contains("grass", ignoreCase = true)
+                val needsBreak = !stateAbove.isAir && (!isReplaceable || stateAbove.block.name.string.contains("Kelp", ignoreCase = true))
+                
+                if (needsBreak) {
+                    currentState = PlacementState.BREAKING_OBSTACLE
+                    stateStartTime = System.currentTimeMillis()
+                    return false // Transition, wait for next tick
+                } else {
+                    currentState = PlacementState.PLACING
+                    return false
+                }
+            }
+            
+            PlacementState.BREAKING_OBSTACLE -> {
+                val target = currentTarget ?: run { currentState = PlacementState.IDLE; return false }
+                
+                // Timeout (3s)
+                if (System.currentTimeMillis() - stateStartTime > 3000) {
+                    invalidateCurrentTarget()
+                    currentState = PlacementState.IDLE
+                    return false
+                }
+                
+                AquamixDrawBot.botController.inventoryManager.equipBestPickaxe(client)
+                val broken = updateBreaking(client, target.up())
+                if (broken) {
+                    stopBreaking()
+                    currentState = PlacementState.PLACING
+                }
+                return false // Action in progress
+            }
+            
+            PlacementState.PLACING -> {
+                val target = currentTarget ?: run { currentState = PlacementState.IDLE; return false }
+                
+                // Equip BUR
+                 val inventory = player.inventory
+                 val burSlot = (0..8).find { inventory.getStack(it).item == Items.END_PORTAL_FRAME }
+                 
+                 if (burSlot == null) return false
+                 if (inventory.selectedSlot != burSlot) {
+                     inventory.selectedSlot = burSlot
+                     return false // Wait for swap
+                 }
+                 
+                 // Safety Check
+                 val burPos = target.up()
+                 if (player.boundingBox.intersects(net.minecraft.util.math.Box(burPos))) {
+                     invalidateCurrentTarget()
+                     currentState = PlacementState.IDLE
+                     return false
+                 }
+                 
+                 // Place
                  lookAt(player, target)
                  val hitResult = BlockHitResult(Vec3d.ofCenter(target).add(0.0, 1.0, 0.0), Direction.UP, target, false)
                  val result = interactionManager.interactBlock(player, Hand.MAIN_HAND, hitResult)
@@ -174,31 +186,53 @@ class ChunkBreaker {
                  if (result.isAccepted) {
                      player.swingHand(Hand.MAIN_HAND)
                      markAction()
-                     AquamixDrawBot.LOGGER.info("BUR placed!")
-                     reset()
-                     return true
+                     currentState = PlacementState.WAITING_CONFIRMATION
+                     stateStartTime = System.currentTimeMillis()
                  } else {
-                     // Try neighbors
+                     // Try neighbors?
                      if (tryPlaceAgainstNeighbors(client, burPos)) {
                          player.swingHand(Hand.MAIN_HAND)
                          markAction()
-                         AquamixDrawBot.LOGGER.info("BUR neighbor placed!")
+                         currentState = PlacementState.WAITING_CONFIRMATION
+                         stateStartTime = System.currentTimeMillis()
+                     } else {
+                         invalidateCurrentTarget() // Failed
+                         currentState = PlacementState.IDLE
+                     }
+                 }
+                 return false
+            }
+            
+            PlacementState.WAITING_CONFIRMATION -> {
+                // Wait up to 500ms for block update
+                if (System.currentTimeMillis() - stateStartTime > 500) {
+                     // Timeout? Assume success if we just placed it clientside? 
+                     // Or assume fail?
+                     // Let's check block state.
+                     val target = currentTarget ?: return false
+                     val state = world.getBlockState(target.up())
+                     if (state.block == net.minecraft.block.Blocks.END_PORTAL_FRAME) {
+                         AquamixDrawBot.LOGGER.info("BUR confirmed!")
                          reset()
                          return true
                      }
+                     
+                     // If still air/old block -> Failed
+                     invalidateCurrentTarget()
+                     currentState = PlacementState.IDLE
+                     return false
+                }
+                
+                // Fast check
+                val target = currentTarget ?: return false
+                 if (world.getBlockState(target.up()).block == net.minecraft.block.Blocks.END_PORTAL_FRAME) {
+                     AquamixDrawBot.LOGGER.info("BUR confirmed fast!")
+                     reset()
+                     return true
                  }
-             }
-             
-             // If we failed interaction or safety:
-             invalidateCurrentTarget() 
-             // Logic to pick NEXT best target?
-             // `cachedTargetBlock` is now null. `getTarget` will return next best.
-             val nextTarget = getTarget(client, targetChunk)
-             // Loop continues if nextTarget is not null
-             if (nextTarget == null) return false // No more targets
-             currentTarget = nextTarget
+                 return false
+            }
         }
-        
         return false
     }
     
