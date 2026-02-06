@@ -44,3 +44,9 @@ The bot uses a **custom flight controller** (`FlightController.kt`) that simulat
 1. Clone the repo.
 2. Run `./gradlew build`.
 3. The jar will be in `build/libs/`.
+
+## Repository & Source Code 📂
+- **GitHub Repository**: [View on GitHub](<YOUR_GITHUB_REPO_URL>)
+- **Source Tree**: [Browse Code](<YOUR_GITHUB_REPO_URL>/tree/master/src/main/kotlin/com/aquamix/drawbot)
+
+*Please replace `<YOUR_GITHUB_REPO_URL>` with your actual repository URL before sharing.*
