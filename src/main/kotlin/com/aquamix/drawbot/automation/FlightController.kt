@@ -251,63 +251,55 @@ class FlightController {
         // Target definition
         val centerX = (chunk.x shl 4) + 8
         val centerZ = (chunk.z shl 4) + 8
-        val configHeight = ModConfig.data.navigation.flightHeight
+        
+        // Use current height if reasonable, otherwise config height
+        // If we are high up, stay high up (over mountains)
+        // If we are too low (near bedrock?), go up
+        val configHeight = ModConfig.data.navigation.flightHeight.toDouble()
+        val targetY = if (player.y > configHeight) player.y else configHeight
         
         // If we are already close to target chunk 2D, check completion
         val distToCenter = sqrt((player.x - centerX) * (player.x - centerX) + (player.z - centerZ) * (player.z - centerZ))
-        // Optimization: Increase tolerance if moving fast? No, precision for chunk center.
         if (distToCenter < 1.0) {
              currentPath = null
              stopMovement(client)
              return true
         }
         
-        // Path handling
+        // Path handling - Check line of sight
+        val targetVec = net.minecraft.util.math.Vec3d(centerX.toDouble(), targetY, centerZ.toDouble())
+        
+        // Check if we need pathfinding (if blocked)
         if (currentPath == null || pathIndex >= (currentPath?.size ?: 0)) {
-            // Need a new path
-            if (pathFinder == null) pathFinder = PathFinder(client.world!!)
-            
-            val targetY = if (player.y > (configHeight - 5)) player.blockY else configHeight
-            val targetPos = BlockPos(centerX, targetY, centerZ)
-            
-            AquamixDrawBot.LOGGER.info("Calculating new flight path to $targetPos...")
-            val rawPath = pathFinder?.findPath(player.blockPos, targetPos)
-            
-            // SMOOTHING: Optimize the path
-            currentPath = if (rawPath != null) smoothPath(client, rawPath) else null
-            pathIndex = 0
-            
-            if (currentPath == null) {
-                AquamixDrawBot.LOGGER.warn("Path finding failed! Using direct flight.")
-                // Fallback direct
-                return moveTowards(client, centerX.toDouble(), targetY.toDouble(), centerZ.toDouble())
+            if (!isLineOfSightClear(client, player.pos, targetVec)) {
+                 if (pathFinder == null) pathFinder = PathFinder(client.world!!)
+                 
+                 val targetPos = BlockPos(centerX, targetY.toInt(), centerZ)
+                 AquamixDrawBot.LOGGER.info("Calculating new flight path to $targetPos...")
+                 val rawPath = pathFinder?.findPath(player.blockPos, targetPos)
+                 
+                 // SMOOTHING: Optimize the path
+                 currentPath = if (rawPath != null) smoothPath(client, rawPath) else null
+                 pathIndex = 0
             }
         }
         
-        // Follow Path
-        val path = currentPath!!
-        
-        if (pathIndex < path.size) {
-            val nextNode = path[pathIndex]
-            val nodeX = nextNode.x + 0.5
-            val nodeY = nextNode.y + 0.5
-            val nodeZ = nextNode.z + 0.5
+        if (currentPath != null) {
+            // Follow Path
+            val path = currentPath!!
             
-        // Check radius to current node
-        // OPTIMIZATION: If we can see the NEXT node, skip current immediately
-        if (pathIndex + 1 < path.size) {
-                val nextNext = path[pathIndex + 1]
-                val nX = nextNext.x + 0.5
-                val nY = nextNext.y + 0.5
-                val nZ = nextNext.z + 0.5
+            if (pathIndex < path.size) {
+                val nextNode = path[pathIndex]
+                val nodeX = nextNode.x + 0.5
+                val nodeY = nextNode.y + 0.5
+                val nodeZ = nextNode.z + 0.5
                 
-                // If we are close enough to current OR we can just fly to next directly
-                if (isLineOfSightClear(client, player.pos, net.minecraft.util.math.Vec3d(nX, nY, nZ))) {
-                    // Skip to next
+                // Check radius to current node
+                val distToNode = player.squaredDistanceTo(nodeX, nodeY, nodeZ)
+                if (distToNode < 4.0) {
                     pathIndex++
-                    moveTowards(client, nX, nY, nZ) // Move to next immediately
-                    return false
                 }
+<<<<<<< HEAD
         }
         
         // CRITICAL: Predictive Re-pathing (Kimi Fix 1)
@@ -334,13 +326,25 @@ class FlightController {
                 if (pathIndex >= path.size) {
                     currentPath = null
                     return false // Last step
+=======
+                
+                // Optimization: Skip nodes if visual path is clear
+                if (pathIndex + 1 < path.size) {
+                    val nextNext = path[pathIndex + 1]
+                    val nnVec = net.minecraft.util.math.Vec3d.ofCenter(nextNext)
+                    if (isLineOfSightClear(client, player.pos, nnVec)) {
+                         pathIndex++
+                    }
+>>>>>>> d4380ea (Save local progress and add prompts)
                 }
+                
+                moveTowards(client, nodeX, nodeY, nodeZ)
+                return false
             }
-            
-            moveTowards(client, nodeX, nodeY, nodeZ)
-            return false
         }
         
+        // Fallback or Direct Flight (if Line of Sight is clear or path failed)
+        moveTowards(client, centerX.toDouble(), targetY, centerZ.toDouble())
         return false
     }
     
@@ -464,74 +468,72 @@ class FlightController {
     fun getCurrentPath(): List<BlockPos>? = currentPath
     
     /**
-     * Executes manual movement towards a specific coordinate.
-     * Core flight physics logic.
+     * Executes SMART flight movement.
+     * Replaces simple vector math with terrain-aware raycasting.
+     */
+    /**
+     * Executes FLUID VECTOR FIELD flight movement.
+     * Uses potential fields (Attraction - Repulsion) for smooth obstacle avoidance.
+     */
+    /**
+     * Executes DIRECT Baritone-style flight movement.
+     * Simply looks at the target and moves forward.
+     * Relies on PathFinder for obstacle avoidance.
      */
     fun moveTowards(client: MinecraftClient, targetX: Double, targetY: Double, targetZ: Double, updateRotation: Boolean = true): Boolean {
         val player = client.player ?: return false
         
+        // 1. Calculate Vector to Target
         val dx = targetX - player.x
         val dy = targetY - player.y
         val dz = targetZ - player.z
-        val horizontalDistSq = dx * dx + dz * dz
-        val horizontalDist = sqrt(horizontalDistSq)
-        val totalDist = sqrt(horizontalDistSq + dy * dy)
+        val distToTargetSq = dx * dx + dy * dy + dz * dz
+        val distToTarget = sqrt(distToTargetSq)
         
-        val threshold = 0.5
-        
-        // Stuck Check
-        if (checkStuck(client)) return false // Recovering
-
-        if (totalDist < threshold) {
+        // Arrival check
+        if (distToTarget < 0.5) {
             stopMovement(client)
             return true
         }
         
-        // Rotation (Smoothed)
-        if (updateRotation && horizontalDist > 0.5) {
-            val targetYaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
-            val targetPitch = Math.toDegrees(atan2(-dy, horizontalDist)).toFloat().coerceIn(-90f, 90f)
+        // 2. Rotation (Look where we are going)
+        // Baritone style: Snap to target instantly
+        if (updateRotation) {
+            val yaw = Math.toDegrees(atan2(-dx, dz)).toFloat()
+            val pitch = Math.toDegrees(atan2(-dy, sqrt(dx*dx + dz*dz))).toFloat().coerceIn(-90f, 90f)
             
-            // SMOOTH TURNS (Cinematic)
-            player.yaw = lerpAngle(player.yaw, targetYaw, 0.3f)
-            player.pitch = lerpAngle(player.pitch, targetPitch, 0.3f)
+            player.yaw = yaw
+            player.pitch = pitch
         }
         
-        // Movement
-        // MOVEMENT LOGIC
-        // If dist > 0.5 (or configured speed), SPRINT.
-        // NEVER SNEAK if we are moving horiz > 0.1
-        val isMoving = totalDist > 0.1
-        val speedCheck = horizontalDist > threshold
+        // 3. Inputs
+        // Always move forward towards the target
+        InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, true) // Always press forward
+        InputOverrideHandler.setInputForced(BotInput.SPRINT, true)       // Always sprint
         
-        // GLOBAL SAFETY LOCK: Prevent Sneak if moving horizontally
-        InputOverrideHandler.preventSneak = isMoving && horizontalDist > 0.5
-        
-        InputOverrideHandler.setInputForced(BotInput.MOVE_FORWARD, isMoving && speedCheck)
-        InputOverrideHandler.setInputForced(BotInput.SPRINT, isMoving) // Always sprint if moving
-        // InputOverrideHandler.setInputForced(BotInput.SNEAK, false) // Handled by lock
-        player.isSprinting = isMoving
-        
-        // Vertical
+        // Vertical Inputs based on Pitch/Vector Y
+        // If looking up/down significantly, use Jump/Sneak to assist vertical movement
+        // But mainly we trust the pitch + forward movement in creative flight
         if (player.abilities.flying) {
+             // If we need to go up steeply
             if (dy > 0.5) {
                 InputOverrideHandler.setInputForced(BotInput.JUMP, true)
                 InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
             } else if (dy < -0.5) {
-                // Fix: Only use SNEAK to descend if we are NOT moving fast horizontally.
-                // If moving fast, pitch (look down) handles descent. Crowding SNEAK kills speed.
-                val useSneakToDescend = horizontalDist < 2.0 
-                InputOverrideHandler.setInputForced(BotInput.SNEAK, useSneakToDescend)
+                InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
                 InputOverrideHandler.setInputForced(BotInput.JUMP, false)
             } else {
                 InputOverrideHandler.setInputForced(BotInput.JUMP, false)
-                // Fine adjustments
-                if (dy < -0.1 && horizontalDist < 1.0) InputOverrideHandler.setInputForced(BotInput.SNEAK, true)
-                else InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
+                InputOverrideHandler.setInputForced(BotInput.SNEAK, false)
             }
         }
+        
+        // 4. Stuck Check
+        if (checkStuck(client)) return false
+        
         return false
     }
+
 
     fun flyToBlock(client: MinecraftClient, targetBlock: BlockPos): Boolean {
         val player = client.player ?: return false
@@ -541,19 +543,19 @@ class FlightController {
         val targetY = targetBlock.y + 2.0 // Hover
         val targetZ = targetBlock.z + 0.5
         
+        // Check if we need pathfinding (if far away or obstructed)
         if (currentPath == null || pathIndex >= (currentPath?.size ?: 0)) {
-            if (pathFinder == null) pathFinder = PathFinder(client.world!!)
-            
-            // Path to Hover pos
-            val targetPos = BlockPos(targetBlock.x, targetBlock.y + 2, targetBlock.z)
-            // If already close, skip pathing
-            if (player.squaredDistanceTo(targetX, targetY, targetZ) < 100.0) {
-                 // Close enough for direct approach? May need path if obstructed.
-                 // Let's use pathfinder if distance > 5
-                 if (player.squaredDistanceTo(targetX, targetY, targetZ) > 25.0) {
-                      currentPath = pathFinder?.findPath(player.blockPos, targetPos)
-                      pathIndex = 0
-                 }
+            // Direct Line Check
+            if (isLineOfSightClear(client, player.pos, net.minecraft.util.math.Vec3d(targetX, targetY, targetZ))) {
+                 // Direct flight is safe
+                 currentPath = null
+            } else {
+                 if (pathFinder == null) pathFinder = PathFinder(client.world!!)
+                 val targetPos = BlockPos(targetBlock.x, targetBlock.y + 2, targetBlock.z)
+                 currentPath = pathFinder?.findPath(player.blockPos, targetPos)
+                 // Smooth it
+                 currentPath = if (currentPath != null) smoothPath(client, currentPath!!) else null
+                 pathIndex = 0
             }
         }
         
@@ -566,17 +568,28 @@ class FlightController {
                 val nodeY = nextNode.y + 0.5
                 val nodeZ = nextNode.z + 0.5
                 
-                if (player.squaredDistanceTo(nodeX, nodeY, nodeZ) < 2.0) {
+                // Advance node if close
+                if (player.squaredDistanceTo(nodeX, nodeY, nodeZ) < 4.0) {
                     pathIndex++
                 }
+                
+                // If we can see next node, skip current
+                if (pathIndex + 1 < path.size) {
+                    val nextNext = path[pathIndex + 1]
+                    val nnVec = net.minecraft.util.math.Vec3d.ofCenter(nextNext)
+                    if (isLineOfSightClear(client, player.pos, nnVec)) {
+                        pathIndex++
+                    }
+                }
+                
                 moveTowards(client, nodeX, nodeY, nodeZ)
                 return false
             }
         }
         
-        // Direct approach (Final stretch)
+        // Direct approach (Final stretch or no path needed)
         val dist = sqrt((player.x - targetX)*(player.x - targetX) + (player.y - targetY)*(player.y - targetY) + (player.z - targetZ)*(player.z - targetZ))
-        if (dist < 1.0) {
+        if (dist < 0.5) {
             stopMovement(client)
             return true
         }
@@ -598,7 +611,11 @@ class FlightController {
         // Find ground level (first solid block from top)
         var groundY = 64
         var isWaterAboveGround = false
-        for (y in player.blockY + 5 downTo world.bottomY) {
+        
+        // Scan down from player or sky
+        val startY = player.blockY.coerceAtLeast(world.bottomY + 10)
+        
+        for (y in startY downTo world.bottomY) {
             val pos = net.minecraft.util.math.BlockPos(centerX, y, centerZ)
             val block = world.getBlockState(pos)
             
@@ -622,7 +639,7 @@ class FlightController {
         val horizontalDist = sqrt((player.x - targetX) * (player.x - targetX) + (player.z - targetZ) * (player.z - targetZ))
         val dy = player.y - targetY
         
-        if (horizontalDist < 2.0 && kotlin.math.abs(dy) < 2.0) {
+        if (horizontalDist < 1.0 && kotlin.math.abs(dy) < 1.0) {
             stopMovement(client)
             return true
         }
@@ -663,6 +680,9 @@ class FlightController {
         val player = client.player ?: return
         moveTowards(client, player.x, targetHeight, player.z)
     }
+
+    // Removed calculateRepulsionVector - Causes spinning and issues.
+    // We trust the PathFinder or direct visual flight.
 
     fun reset() {
         isFlying = false

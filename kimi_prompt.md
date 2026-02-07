@@ -1,14 +1,15 @@
 # Role
-You are a Staff Software Engineer specializing in **Kotlin**, **Minecraft Fabric Modding**, and **Autonomous Agent Pathfinding**.
+You are a Principal Software Architect specializing in **High-Performance Minecraft Bots**, **Concurrency**, and **Control Theory**.
 
 # Task
-Analyze the source code of the **Aquamix Draw Bot**, specifically focusing on the movement and interaction modules. The user is experiencing edge-case issues where the bot sometimes clips into trees or handles obstacle avoidance inefficiently.
+Your mission is to upgrade the **Aquamix Draw Bot** from a naive script to a sophisticated **Autonomous Agent (Phase 3)**. The current bot uses basic Vector Field Navigation and brute-force block scanning, which causes frame drops and jerky movement.
 
-# Context
-The bot is designed to fly autonomously through a Minecraft world and place "BURs" (End Portal Frames) to clear chunks.
-- **Methodology**: It uses "Input Injection" (simulating key presses) rather than direct packet manipulation for movement, making it robust but physics-dependent.
-- **Documentation**: Please read the `README.md` first to understand the "BUR" mechanic and the architecture.
+# Current State
+- **Movement**: Vector Field Navigation (Attraction/Repulsion) implementation in `FlightController.kt`. Functional but lacks inertia handling.
+- **Scanning**: Main-thread block iteration (`ChunkBreaker.kt`). Causes lag spikes.
+- **Interaction**: Basic packet placement with fail-fast retries.
 
+<<<<<<< HEAD
 # Progress Update (Phase 1 Complete)
 We have implemented your previous recommendations:
 1.  **Predictive Look-Ahead**: `FlightController` now checks 3 nodes ahead.
@@ -23,18 +24,35 @@ Please analyze the code again (check the latest commit) and provide **Advanced O
 3.  **Next-Level Logic**: How can we make the bot "smarter" about choosing which chunk to go to next? currently it uses a simple distance sort.
 
 Please provide code snippets for these "Phase 2" improvements.
+=======
+# Objectives (Phase 3 Roadmap)
+
+1.  **Multi-threaded Spatial Indexing (CRITICAL)**:
+    - Offload all block scanning to a background daemon thread (`Executors.newSingleThreadExecutor`).
+    - Implement `ChunkSpatialIndex` to cache target blocks in a thread-safe manner.
+    - Result: **Zero lag spikes** during flight/scanning.
+
+2.  **PID Flight Controller**:
+    - Replace the raw "Speed = 2.0" logic with a **PID Controller** for smooth velocity transitions.
+    - Implement `FlightWaypoint` system with approach vectors to eliminate "stop-and-go" at chunk borders.
+    - Goal: Cinematic, fluid movement that mimics a skilled player.
+
+3.  **Predictive Lag Compensation**:
+    - Implement `LagCompensator` using a **Kalman Filter** to estimate server latency.
+    - Dynamically adjust `ClickDelay` and `BreakTimeout` based on ping jitter.
+    - Goal: Resilience against 500ms+ lag spikes.
+
+4.  **Behavioral Mimicry (Anti-Cheat)**:
+    - Inject stochastic "human noise" into rotation (Simplex noise).
+    - Implement "Micro-Pauses" (simulated distractions) and "Overshoot" (imperfect aiming).
+>>>>>>> d4380ea (Save local progress and add prompts)
 
 # Reference Files
+- `src/main/kotlin/com/aquamix/drawbot/automation/FlightController.kt`: Movement logic (Target for PID).
+- `src/main/kotlin/com/aquamix/drawbot/automation/ChunkBreaker.kt`: Interaction logic (Target for Threading).
 - `README.md`: System overview.
-- `src/main/kotlin/com/aquamix/drawbot/automation/FlightController.kt`: Movement logic.
-- `src/main/kotlin/com/aquamix/drawbot/pathing/PathFinder.kt`: A* logic types.
-- `src/main/kotlin/com/aquamix/drawbot/automation/ChunkBreaker.kt`: Block interaction logic.
 
 # Repository Access
-The full source code is available here:
-- **GitHub Repo**: [View Code](https://github.com/ItzZonk/miencraft-bot)
-- **Source Tree**: `src/main/kotlin/com/aquamix/drawbot/`
+- **Source**: `src/main/kotlin/com/aquamix/drawbot/`
 
-Please refer to the repository for the complete context of imports and helper classes.
-
-Please provide a detailed analysis and specific code snippets for recommended fixes.
+Please analyze the codebase and provide a concrete implementation plan for **Objective 1 (Multi-threading)** first.

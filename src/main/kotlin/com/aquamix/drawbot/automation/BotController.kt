@@ -163,7 +163,7 @@ class BotController {
                 // Активируем /fly
                 flightController.ensureFlyActive(client)
                 
-                // ALWAYS try to find target block first (Zero Height Limit logic)
+                // ALWAYS try to find target block first
                 // If chunk is loaded, get target immediately
                 if (client.world != null && client.world!!.chunkManager.isChunkLoaded(state.target.x, state.target.z)) {
                     val targetBlock = chunkBreaker.getTarget(client, state.target)
@@ -174,7 +174,8 @@ class BotController {
                     }
                 }
                 
-                // Fallback: Fly to chunk center (only if chunk not loaded or no block found)
+                // Fallback: Fly to chunk center
+                // The new flyToChunk handles height automatically (current Y or safe Y)
                 if (flightController.flyToChunk(client, state.target)) {
                     stateMachine.transition(BotState.PlacingBur(state.target))
                 }
@@ -425,22 +426,14 @@ class BotController {
         
         sendMessage("§a[DrawBot] Чанк ${chunk.x}, ${chunk.z} сломан! Осталось: ${chunksQueue.size}")
         
-        // REMOVED: Ascend to safe height. Now we fly directly.
+        // Direct Flight to Next Target
         if (chunksQueue.isNotEmpty()) {
             val nextTarget = chunksQueue.firstOrNull()
             if (nextTarget != null) {
-                // OPTIMIZATION: Try to find target block in next chunk NOW (while in current chunk)
-                // This allows flying directly to the block instead of the chunk center
                 val client = MinecraftClient.getInstance()
-                // We reset chunk breaker to ensure we look for a new target
                 chunkBreaker.reset()
                 
-                // Note: We might be too far to load the chunk fully or find the block if it's not rendered.
-                // But if we can find it, it's a huge speedup.
-                // We pass the nextChunk to getTarget. 
-                // Since 'getTarget' uses world.getBlockState, it works if chunk is loaded.
-                
-                // Just peek, don't force exhaustive scan yet if not loaded
+                // Try to find target block immediately in next chunk (if loaded)
                 val world = client.world
                 if (world != null && world.chunkManager.isChunkLoaded(nextTarget.x, nextTarget.z)) {
                     val targetBlock = chunkBreaker.getTarget(client, nextTarget)
